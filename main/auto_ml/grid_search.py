@@ -1,47 +1,88 @@
 import os
 import csv
-import json
 from itertools import product
-from typing import Dict, Any, Tuple
+from typing import Dict, Any
 
-from config import Config
+import numpy as np
+import matplotlib.pyplot as plt
+
+from config import Config, ITERS, SAMPLES, LRS, ARCHS, ACTS, SHIFTS
 from run import run_vmc, print_devices
 
 
 # -------------------------
-# YOUR FINAL TUNING SPACE
+# Grid size (sanity)
 # -------------------------
-ITERS   = [400, 800]
-SAMPLES = [1024, 2048]
-LRS     = [1e-3, 3e-3]
-ARCHS   = ["N", "N_N", "N_N_N"]
-ACTS    = ["log_cosh", "silu", "gelu"]
-SHIFTS  = [1e-2]
-
 TOTAL = len(ITERS) * len(SAMPLES) * len(LRS) * len(ARCHS) * len(ACTS) * len(SHIFTS)
 
 
 # -------------------------
-# OUTPUT FOLDERS
+# Output folders
 # -------------------------
 OUTDIR = "outputs"
+CSV_PATH = os.path.join(OUTDIR, "results.csv")
 HISTDIR = os.path.join(OUTDIR, "histories")
 PLOTDIR = os.path.join(OUTDIR, "plots")
+TRACE_DIR = os.path.join(PLOTDIR, "energy_traces")
+SUMMARY_DIR = os.path.join(PLOTDIR, "summary")
+
 os.makedirs(OUTDIR, exist_ok=True)
 os.makedirs(HISTDIR, exist_ok=True)
-os.makedirs(PLOTDIR, exist_ok=True)
-
-CSV_PATH = os.path.join(OUTDIR, "results.csv")
-META_PATH = os.path.join(OUTDIR, "grid_meta.json")
+os.makedirs(TRACE_DIR, exist_ok=True)
+os.makedirs(SUMMARY_DIR, exist_ok=True)
 
 
 # -------------------------
-# Pretty table (ASCII)
+# CSV fields
 # -------------------------
-COLS = ["idx", "score", "final_E", "Eerr", "it", "ns", "lr", "shift", "arch", "act", "params"]
-W = {"idx": 5, "score": 12, "final_E": 12, "Eerr": 10, "it": 4, "ns": 6, "lr": 10, "shift": 8, "arch": 8, "act": 9, "params": 8}
+CSV_FIELDS = [
+    "idx",
+    "score",
+    "final_E",
+    "final_Eerr",
+    "per_site_E",
+    "per_site_Eerr",
+    "min_E",
+    "n_params",
+    "n_sites",
+    "it", "ns", "lr", "shift", "arch", "act",
+    "history_file",
+]
 
-def _fmt(x, width, prec=4):
+
+def append_csv(path: str, row: Dict[str, Any]):
+    exists = os.path.exists(path)
+    with open(path, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        if not exists:
+            w.writeheader()
+        w.writerow(row)
+
+
+# -------------------------
+# ASCII table printer
+# -------------------------
+COLS = [
+    "idx", "score", "final_E", "Eerr", "E/site", "params",
+    "it", "ns", "lr", "shift", "arch", "act"
+]
+W = {
+    "idx": 4,
+    "score": 12,
+    "final_E": 12,
+    "Eerr": 10,
+    "E/site": 12,
+    "params": 8,
+    "it": 4,
+    "ns": 6,
+    "lr": 10,
+    "shift": 8,
+    "arch": 10,
+    "act": 9,
+}
+
+
+def _fmt(x, width: int, prec: int = 4) -> str:
     if x is None:
         s = "-"
     elif isinstance(x, int):
@@ -54,9 +95,11 @@ def _fmt(x, width, prec=4):
             s = f"{x:.{prec}f}"
     else:
         s = str(x)
+
     if len(s) > width:
         s = s[: width - 1] + "…"
     return s.rjust(width)
+
 
 def print_header():
     header = " | ".join(c.center(W[c]) for c in COLS)
@@ -64,87 +107,94 @@ def print_header():
     print(header)
     print(sep)
 
-def print_row(row: Dict[str, Any]):
-    line = " | ".join(_fmt(row.get(c), W[c]) for c in COLS)
+
+def print_row(r: Dict[str, Any]):
+    line = " | ".join(_fmt(r.get(c), W[c]) for c in COLS)
     print(line)
 
 
 # -------------------------
-# Resume support
+# Plot helpers
 # -------------------------
-def _key(it: int, ns: int, lr: float, shift: float, arch: str, act: str) -> Tuple[int, int, float, float, str, str]:
-    return (it, ns, float(lr), float(shift), arch, act)
-
-def load_done_keys(csv_path: str):
-    done = set()
-    if not os.path.exists(csv_path):
-        return done
-    with open(csv_path, "r", newline="") as f:
-        reader = csv.DictReader(f)
-        for r in reader:
-            done.add(_key(
-                int(r["it"]), int(r["ns"]), float(r["lr"]), float(r["shift"]), r["arch"], r["act"]
-            ))
-    return done
-
-def append_csv(csv_path: str, fieldnames, rowdict):
-    file_exists = os.path.exists(csv_path)
-    with open(csv_path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(rowdict)
+def save_trace_plot(iters, energy, err, title, outpath):
+    plt.figure()
+    plt.plot(iters, energy)
+    plt.fill_between(iters, energy - err, energy + err, alpha=0.2)
+    plt.xlabel("Iteration")
+    plt.ylabel("Energy")
+    plt.title(title)
+    plt.savefig(outpath, dpi=200, bbox_inches="tight")
+    plt.close()
 
 
+def make_summary_plots(rows):
+    # score over index
+    x = [r["idx"] for r in rows]
+    y = [r["score"] for r in rows]
+
+    plt.figure()
+    plt.plot(x, y)
+    plt.xlabel("Configuration index")
+    plt.ylabel("Score (tail-mean energy)")
+    plt.title("Score over grid configurations")
+    plt.savefig(os.path.join(SUMMARY_DIR, "score_over_index.png"), dpi=200, bbox_inches="tight")
+    plt.close()
+
+    # best score per architecture
+    best = {}
+    for r in rows:
+        a = r["arch"]
+        s = r["score"]
+        if a not in best or s < best[a]:
+            best[a] = s
+    archs = sorted(best.keys())
+    vals = [best[a] for a in archs]
+
+    plt.figure()
+    plt.bar(archs, vals)
+    plt.xlabel("Architecture")
+    plt.ylabel("Best score (lower is better)")
+    plt.title("Best score per architecture")
+    plt.savefig(os.path.join(SUMMARY_DIR, "best_score_per_arch.png"), dpi=200, bbox_inches="tight")
+    plt.close()
+
+    # best score per activation
+    best_act = {}
+    for r in rows:
+        a = r["act"]
+        s = r["score"]
+        if a not in best_act or s < best_act[a]:
+            best_act[a] = s
+    acts = sorted(best_act.keys())
+    vals = [best_act[a] for a in acts]
+
+    plt.figure()
+    plt.bar(acts, vals)
+    plt.xlabel("Activation")
+    plt.ylabel("Best score (lower is better)")
+    plt.title("Best score per activation")
+    plt.savefig(os.path.join(SUMMARY_DIR, "best_score_per_activation.png"), dpi=200, bbox_inches="tight")
+    plt.close()
+
+
+# -------------------------
+# Main
+# -------------------------
 if __name__ == "__main__":
     print_devices()
     print(f"\nGrid size: {TOTAL} runs")
-    print(f"Writing CSV to: {CSV_PATH}")
-    print(f"Writing histories to: {HISTDIR}\n")
-
-    # save meta once (useful for your paper)
-    if not os.path.exists(META_PATH):
-        with open(META_PATH, "w") as f:
-            json.dump({
-                "ITERS": ITERS,
-                "SAMPLES": SAMPLES,
-                "LRS": LRS,
-                "ARCHS": ARCHS,
-                "ACTS": ACTS,
-                "SHIFTS": SHIFTS,
-                "TOTAL": TOTAL,
-            }, f, indent=2)
-
-    done = load_done_keys(CSV_PATH)
-    if done:
-        print(f"Resuming: {len(done)} already done, {TOTAL - len(done)} remaining.\n")
-
-    csv_fields = [
-        "idx",
-        "score",
-        "final_E",
-        "final_Eerr",
-        "per_site_E",
-        "per_site_Eerr",
-        "min_E",
-        "n_params",
-        "n_sites",
-        "rhat_last",
-        "taucorr_last",
-        "it", "ns", "lr", "shift", "arch", "act",
-        "history_file",
-    ]
-
-    best = None
-    idx = 0
+    print(f"CSV:      {CSV_PATH}")
+    print(f"History:  {HISTDIR}")
+    print(f"Plots:    {PLOTDIR}\n")
 
     print_header()
 
+    idx = 0
+    best = None
+    rows_for_summary = []
+
     for it, ns, lr, shift, arch, act in product(ITERS, SAMPLES, LRS, SHIFTS, ARCHS, ACTS):
         idx += 1
-        key = _key(it, ns, lr, shift, arch, act)
-        if key in done:
-            continue
 
         cfg = Config(
             arch=arch,
@@ -157,11 +207,9 @@ if __name__ == "__main__":
 
         res = run_vmc(cfg)
 
-        # Save history (for plots)
-        run_id = f"it{it}_ns{ns}_lr{lr:.0e}_sh{shift:.0e}_arch{arch}_act{act}"
+        run_id = f"idx{idx:03d}_it{it}_ns{ns}_lr{lr:.0e}_sh{shift:.0e}_arch{arch}_act{act}"
         hist_path = os.path.join(HISTDIR, f"{run_id}.npz")
-        # store arrays + minimal metadata
-        import numpy as np
+
         np.savez_compressed(
             hist_path,
             iters=res["iters"],
@@ -172,36 +220,18 @@ if __name__ == "__main__":
             final_Eerr=res["final_Eerr"],
             per_site_E=res["per_site_E"],
             per_site_Eerr=res["per_site_Eerr"],
+            min_E=res["min_E"],
             n_params=res["n_params"],
             n_sites=res["n_sites"],
-            rhat_last=res["rhat_last"] if res["rhat_last"] is not None else np.nan,
-            taucorr_last=res["taucorr_last"] if res["taucorr_last"] is not None else np.nan,
-            it=it, ns=ns, lr=lr, shift=shift,
-            arch=arch, act=act,
+            it=it, ns=ns, lr=lr, shift=shift, arch=arch, act=act,
         )
 
-        # Print a clean row
-        row = {
-            "idx": idx,
-            "score": res["score"],
-            "final_E": res["final_E"],
-            "Eerr": res["final_Eerr"],
-            "it": it,
-            "ns": ns,
-            "lr": lr,
-            "shift": shift,
-            "arch": arch,
-            "act": act,
-            "params": res["n_params"],
-        }
-        print_row(row)
+        # per-run plot
+        trace_title = f"{arch} | {act} | it={it} ns={ns} lr={lr:.0e} shift={shift:.0e}"
+        trace_png = os.path.join(TRACE_DIR, f"{run_id}.png")
+        save_trace_plot(res["iters"], res["energy"], res["err"], trace_title, trace_png)
 
-        # Update best
-        if best is None or res["score"] < best["score"]:
-            best = {"score": res["score"], "cfg": cfg, "res": res, "hist": hist_path}
-
-        # Append CSV
-        append_csv(CSV_PATH, csv_fields, {
+        row_csv = {
             "idx": idx,
             "score": res["score"],
             "final_E": res["final_E"],
@@ -211,18 +241,44 @@ if __name__ == "__main__":
             "min_E": res["min_E"],
             "n_params": res["n_params"],
             "n_sites": res["n_sites"],
-            "rhat_last": res["rhat_last"],
-            "taucorr_last": res["taucorr_last"],
             "it": it, "ns": ns, "lr": lr, "shift": shift, "arch": arch, "act": act,
             "history_file": hist_path,
-        })
+        }
+        append_csv(CSV_PATH, row_csv)
+        rows_for_summary.append(row_csv)
+
+        # table row
+        row_table = {
+            "idx": idx,
+            "score": res["score"],
+            "final_E": res["final_E"],
+            "Eerr": res["final_Eerr"],
+            "E/site": res["per_site_E"],
+            "params": res["n_params"],
+            "it": it,
+            "ns": ns,
+            "lr": lr,
+            "shift": shift,
+            "arch": arch,
+            "act": act,
+        }
+        print_row(row_table)
+
+        # update best
+        if best is None or res["score"] < best["score"]:
+            best = {"score": res["score"], "row": row_csv}
+
+    # summary plots
+    make_summary_plots(rows_for_summary)
+
+    print("\nDONE")
+    print(f"Saved CSV:   {CSV_PATH}")
+    print(f"Saved NPZ:   {HISTDIR}")
+    print(f"Saved plots: {PLOTDIR}")
 
     if best is not None:
-        print("\n" + "-" * 92)
-        print("BEST FOUND (by tail-mean score)")
-        b = best["cfg"]
-        print(f"score={best['score']:.10f}")
-        print(f"arch={b.arch} act={b.activation} it={b.n_iter} ns={b.n_samples} lr={b.learning_rate:.3e} shift={b.diag_shift:.3e}")
-        print(f"final_E={best['res']['final_E']:.10f} ± {best['res']['final_Eerr']:.10f}")
-        print(f"history={best['hist']}")
-        print("-" * 92)
+        b = best["row"]
+        print("\nBEST (by score = tail-mean energy)")
+        print(f"  score={b['score']:.10f}")
+        print(f"  arch={b['arch']} act={b['act']} it={b['it']} ns={b['ns']} lr={b['lr']:.0e} shift={b['shift']:.0e}")
+        print(f"  final_E={b['final_E']:.10f} ± {b['final_Eerr']:.10f}")

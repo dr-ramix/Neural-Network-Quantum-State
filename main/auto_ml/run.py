@@ -10,7 +10,6 @@ from config import Config
 
 
 def print_devices():
-    # Useful to confirm GPU usage on the cluster
     print("JAX backend:", jax.default_backend())
     print("JAX devices:", jax.devices())
 
@@ -19,11 +18,8 @@ def _activation_fn(name: str):
     name = (name or "none").lower()
     act_map = {
         "log_cosh": nknn.log_cosh,
-        "tanh": jnp.tanh,
-        "relu": jax.nn.relu,
-        "gelu": jax.nn.gelu,
         "silu": jax.nn.silu,
-        "elu": jax.nn.elu,
+        "gelu": jax.nn.gelu,
         "none": None,
     }
     if name not in act_map:
@@ -37,6 +33,7 @@ def hidden_dims_from_arch(arch: str, n_sites: int):
         "N": (N,),
         "N_N": (N, N),
         "N_N_N": (N, N, N),
+        "N_N_N_N": (N, N, N, N),
     }
     if arch not in arch_map:
         raise ValueError(f"Unknown arch '{arch}'. Valid: {list(arch_map.keys())}")
@@ -73,28 +70,23 @@ def build_model(cfg: Config, n_sites: int):
     )
 
 
-def build_sampler(cfg: Config, lattice, hilbert):
-    if cfg.sampler_name != "exchange":
-        raise ValueError("This project supports only sampler_name='exchange'.")
-    return nk.sampler.MetropolisExchange(
-        hilbert=hilbert,
-        graph=lattice,
-        d_max=cfg.d_max,
-        n_chains=cfg.n_chains,
-    )
-
-
 def run_vmc(cfg: Config):
     """
-    Runs VMC+SR and returns:
+    Returns dict with:
       - summary metrics
-      - full energy history (iters, energy mean, sigma)
+      - iters/energy/err arrays (for plots)
     """
     np.random.seed(cfg.seed)
 
     lattice, hilbert, H = build_system(cfg)
     model = build_model(cfg, lattice.n_nodes)
-    sampler = build_sampler(cfg, lattice, hilbert)
+
+    sampler = nk.sampler.MetropolisExchange(
+        hilbert=hilbert,
+        graph=lattice,
+        d_max=cfg.d_max,
+        n_chains=cfg.n_chains,
+    )
 
     vstate = nk.vqs.MCState(
         sampler=sampler,
@@ -119,9 +111,6 @@ def run_vmc(cfg: Config):
     except KeyboardInterrupt:
         print("\n[Interrupted] Returning partial results.\n")
 
-    if "Energy" not in log.data:
-        raise RuntimeError("No 'Energy' key found in log.data. Run may have failed early.")
-
     E_hist = log.data["Energy"]
     iters = np.asarray(E_hist.iters)
     energy = np.asarray(E_hist.Mean.real)
@@ -130,42 +119,20 @@ def run_vmc(cfg: Config):
     tail_start = int(0.8 * len(energy))
     score = float(energy[tail_start:].mean()) if len(energy) else float("inf")
 
-    def safe_last(field: str):
-        try:
-            arr = getattr(E_hist, field)
-            return float(np.asarray(arr)[-1])
-        except Exception:
-            return None
-
-    rhat_last = safe_last("R_hat")
-    taucorr_last = safe_last("TauCorr")
-
     return {
-        # identifiers / sizes
-        "n_sites": int(lattice.n_nodes),
-        "n_params": int(vstate.n_parameters),
-
-        # history
+        "score": score,
         "iters": iters,
         "energy": energy,
         "err": err,
-
-        # summary metrics
-        "score": score,
         "final_E": float(energy[-1]),
         "final_Eerr": float(err[-1]),
         "per_site_E": float(energy[-1] / lattice.n_nodes),
         "per_site_Eerr": float(err[-1] / lattice.n_nodes),
         "min_E": float(energy.min()),
-
-        # diagnostics (might be None)
-        "rhat_last": rhat_last,
-        "taucorr_last": taucorr_last,
+        "n_sites": int(lattice.n_nodes),
+        "n_params": int(vstate.n_parameters),
     }
 
 
 if __name__ == "__main__":
     print_devices()
-    cfg = Config()
-    res = run_vmc(cfg)
-    print("Done. Score:", res["score"], "Final E:", res["final_E"])
