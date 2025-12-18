@@ -10,6 +10,11 @@ import matplotlib.pyplot as plt
 from config import Config, ITERS, SAMPLES, LRS, ARCHS, ACTS, SHIFTS
 from run import run_vmc
 
+import socket
+import jax
+print("Host:", socket.gethostname())
+print("JAX backend:", jax.default_backend())
+print("JAX devices:", jax.devices())
 
 # -------------------------
 # Output paths
