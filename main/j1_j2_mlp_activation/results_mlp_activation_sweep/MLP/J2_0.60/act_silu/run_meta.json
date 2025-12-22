@@ -1,0 +1,25 @@
+{
+  "J1": 1.0,
+  "J2": 0.6,
+  "L": 6,
+  "activation": "silu",
+  "arch": "MLP",
+  "diag_shift": 0.01,
+  "jax_backend": "gpu",
+  "jax_devices": [
+    "cuda:0"
+  ],
+  "mlp_hidden_scale": 1,
+  "n_discard_per_chain": 50,
+  "n_iter": 600,
+  "n_parameters": 2701,
+  "n_samples": 10000,
+  "n_sites": 36,
+  "optimizer": {
+    "learning_rate": 0.001,
+    "type": "Adam"
+  },
+  "param_dtype": "<class 'jax.numpy.complex128'>",
+  "runtime_seconds": 7835.973569393158,
+  "seed": 1234
+}

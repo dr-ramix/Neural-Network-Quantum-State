@@ -1,0 +1,23 @@
+{
+  "J1": 1.0,
+  "J2": 0.4,
+  "L": 6,
+  "arch": "RBM",
+  "diag_shift": 0.01,
+  "jax_backend": "gpu",
+  "jax_devices": [
+    "cuda:0"
+  ],
+  "n_discard_per_chain": 50,
+  "n_iter": 600,
+  "n_parameters": 5364,
+  "n_samples": 10000,
+  "n_sites": 36,
+  "optimizer": {
+    "learning_rate": 0.01,
+    "type": "Adam"
+  },
+  "param_dtype": "<class 'jax.numpy.complex128'>",
+  "runtime_seconds": 19412.09531736374,
+  "seed": 1234
+}
