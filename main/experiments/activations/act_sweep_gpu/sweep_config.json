@@ -1,0 +1,32 @@
+{
+  "J1": 1.0,
+  "J2_list": [
+    0.5,
+    0.6
+  ],
+  "L": 6,
+  "activations": [
+    "relu",
+    "silu",
+    "gelu",
+    "log_cosh"
+  ],
+  "complex_activation_mode": "split",
+  "d_max": 2,
+  "diag_shift": 0.01,
+  "discard": 50,
+  "hidden_layers": 2,
+  "hidden_scale": 1,
+  "jax_backend": "gpu",
+  "jax_devices": [
+    "cuda:0"
+  ],
+  "mlp_lr": 0.001,
+  "n_iter": 600,
+  "n_samples": 10000,
+  "paper_true_values": {
+    "0.5": -0.50381,
+    "0.6": -0.49518
+  },
+  "seed": 1234
+}

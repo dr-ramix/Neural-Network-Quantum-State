@@ -110,7 +110,7 @@ class RunConfig:
 
     n_samples: int = 10000
     n_discard_per_chain: int = 50
-    n_iter: int = 600
+    n_iter: int = 800  # CHANGED: was 600 -> now 800
     diag_shift: float = 0.01
     seed: int = 1234
 
@@ -123,9 +123,9 @@ class RunConfig:
     # RBM
     rbm_alpha: int = 4
 
-    # Optimizers
+    # Optimizers (CHANGED: same LR for both)
     mlp_lr: float = 1e-3
-    rbm_lr: float = 1e-2
+    rbm_lr: float = 1e-3
 
     # dtype
     param_dtype: Any = jnp.complex128
@@ -516,7 +516,7 @@ def main():
     parser.add_argument("--J2_list", type=str, default="0.4,0.5,0.6,1.0")
 
     parser.add_argument("--n_samples", type=int, default=10000)
-    parser.add_argument("--n_iter", type=int, default=600)
+    parser.add_argument("--n_iter", type=int, default=800)  # CHANGED: was 600 -> now 800
     parser.add_argument("--discard", type=int, default=50)
     parser.add_argument("--diag_shift", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=1234)
@@ -524,7 +524,7 @@ def main():
     parser.add_argument("--mlp_lr", type=float, default=1e-3)
     parser.add_argument("--mlp_hidden_scale", type=int, default=1)
 
-    parser.add_argument("--rbm_lr", type=float, default=1e-2)
+    parser.add_argument("--rbm_lr", type=float, default=1e-3)  # CHANGED: was 1e-2 -> now 1e-3
     parser.add_argument("--rbm_alpha", type=int, default=4)
 
     parser.add_argument("--platform", type=str, default=_platform,

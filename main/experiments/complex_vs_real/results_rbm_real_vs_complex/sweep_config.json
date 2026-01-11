@@ -1,0 +1,39 @@
+{
+  "J1": 1.0,
+  "J2_list": [
+    0.4,
+    0.5,
+    0.6,
+    1.0
+  ],
+  "L": 6,
+  "compare": {
+    "complex_param_dtype": "complex128",
+    "real_param_dtype": "float64"
+  },
+  "diag_shift": 0.01,
+  "discard": 50,
+  "ed_true_e_site": {
+    "0.4": null,
+    "0.5": null,
+    "0.6": null,
+    "1.0": null
+  },
+  "jax_backend": "gpu",
+  "jax_devices": [
+    "cuda:0"
+  ],
+  "n_iter": 800,
+  "n_samples": 10000,
+  "paper_true_e_site": {
+    "0.4": -0.52975,
+    "0.5": -0.50381,
+    "0.6": -0.49518,
+    "1.0": -0.71436
+  },
+  "rbm": {
+    "alpha": 4,
+    "lr": 0.001
+  },
+  "seed": 1234
+}

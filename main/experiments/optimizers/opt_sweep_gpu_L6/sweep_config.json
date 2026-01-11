@@ -1,0 +1,26 @@
+{
+  "J1": 1.0,
+  "J2": 0.5,
+  "L": 6,
+  "diag_shift": 0.01,
+  "discard": 50,
+  "ed_true_e_site": null,
+  "jax_backend": "gpu",
+  "jax_devices": [
+    "cuda:0"
+  ],
+  "mlp": {
+    "activation": "log_cosh",
+    "hidden_scale": 1,
+    "lr": 0.001
+  },
+  "n_iter": 800,
+  "n_samples": 10000,
+  "paper_true_e_site": -0.50381,
+  "rbm": {
+    "alpha": 4,
+    "lr": 0.001
+  },
+  "seed": 1234,
+  "weight_decay": 0.0001
+}
