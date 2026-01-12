@@ -17,6 +17,7 @@
     "cuda:0"
   ],
   "mlp_lr": 0.001,
+  "mode": "train",
   "n_iter": 600,
   "n_samples": 10000,
   "paper_true_e_site": -0.50381,

@@ -1,0 +1,22 @@
+{
+  "J1": 1.0,
+  "J2": 0.5,
+  "J2_list": "0.5,0.6",
+  "L": 6,
+  "activation": "log_cosh",
+  "activations": "relu,silu,gelu,log_cosh",
+  "complex_activation_mode": "split",
+  "d_max": 2,
+  "diag_shift": 0.01,
+  "discard": 50,
+  "dtype": "complex",
+  "ed_max_sites": 20,
+  "hidden_scale": 1,
+  "mlp_lr": 0.001,
+  "mode": "train",
+  "n_iter": 800,
+  "n_samples": 10000,
+  "out": "results_activation_L6",
+  "platform": "gpu",
+  "seed": 1234
+}

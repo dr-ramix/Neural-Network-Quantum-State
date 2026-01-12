@@ -2,35 +2,26 @@
 # -*- coding: utf-8 -*-
 
 """
-Depth sweep for MLP Neural Quantum States (NetKet) on J1-J2 Heisenberg model:
-  - Fixed: J1 = 1.0, J2 = 0.5
-  - LxL square lattice (PBC), total_sz = 0 sector (as before)
-  - MLP only, varying depth with width N = n_sites per hidden layer:
-      depth=1 : (N)
-      depth=2 : (N, N)
-      depth=3 : (N, N, N)
-      depth=4 : (N, N, N, N)
-  - Run each depth once with real parameters and once with complex parameters.
+Depth sweep for MLP Neural Quantum States (NetKet) on J1-J2 Heisenberg model.
 
-Outputs (under --out):
-  MLP_depth_real/
-    depth_1/, depth_2/, depth_3/, depth_4/
-  MLP_depth_complex/
-    depth_1/, depth_2/, depth_3/, depth_4/
-  compare_depth_per_dtype/
-    real/   (all depths on one plot, 3 variants)
-    complex/(all depths on one plot, 3 variants)
-  compare_depth_real_vs_complex/
-    (each depth: real vs complex, 3 variants)
-  overall_results.csv / overall_results.txt
-  per_run_summary.csv / per_run_summary.txt
+This version adds **separable execution** + **late merge/aggregate** while keeping the
+numerical logic and outputs as close as possible to your original script.
 
-For every plot:
-  (a) no true value
-  (b) with paper true value (E/site = -0.50381 at J2=0.5)
-  (c) with NetKet ED true value if feasible (small systems only, controlled by --ed_max_sites)
+Modes:
+  --mode sweep      (default) original behavior: run all depths and both dtypes in one process
+  --mode train      run ONE configuration only: (depth, dtype) -> writes history + meta + per-run plots
+  --mode aggregate  do NOT train; read existing outputs and generate:
+                      - per-run plots (3 variants) for available runs
+                      - compare_depth_per_dtype (real/complex) if all depths for that dtype exist
+                      - compare_depth_real_vs_complex per depth if both dtypes exist for that depth
+                      - compare_all_depths_and_dtypes if all runs exist
+                      - per_run_summary + overall_results (missing entries allowed)
 
-GPU support:
+Dtypes preserved exactly:
+  real    -> jnp.float64
+  complex -> jnp.complex128
+
+GPU support unchanged:
   --platform gpu sets JAX_PLATFORM_NAME=gpu BEFORE importing jax/netket.
 """
 
@@ -44,7 +35,7 @@ from typing import Dict, List, Any, Optional, Tuple
 
 import numpy as np
 
-# --- FIX 1: force headless matplotlib on clusters (before pyplot import) ---
+# --- Force headless matplotlib on clusters (before pyplot import) ---
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -88,6 +79,12 @@ def save_json(path: Path, obj: dict) -> None:
     ensure_dir(path.parent)
     path.write_text(json.dumps(obj, indent=2, sort_keys=True), encoding="utf-8")
 
+def load_json(path: Path) -> Optional[dict]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
 def fmt_pm(val: float, err: float, prec: int = 6) -> str:
     return f"{val:.{prec}f} ± {err:.{prec}f}"
 
@@ -110,7 +107,53 @@ def style_matplotlib():
         "lines.linewidth": 2.0,
     })
 
+def parse_depths(s: str) -> List[int]:
+    return [int(x.strip()) for x in s.split(",") if x.strip()]
 
+def history_csv_path(outdir: Path, tag: str) -> Path:
+    return outdir / f"{tag}_history.csv"
+
+def load_history_csv(csv_path: Path) -> Dict[str, np.ndarray]:
+    """
+    Loads the history CSV produced by run_single_vmc_sr_mlp_depth().
+
+    CSV format:
+      # comment lines...
+      iter,energy_mean,energy_sigma,energy_per_site_mean,energy_per_site_sigma
+      ...
+    """
+    if not csv_path.exists():
+        raise FileNotFoundError(str(csv_path))
+
+    rows = []
+    with csv_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip() or line.startswith("#"):
+                continue
+            if line.lower().startswith("iter,"):
+                continue
+            parts = line.strip().split(",")
+            if len(parts) != 5:
+                continue
+            rows.append(parts)
+
+    if not rows:
+        raise ValueError(f"No data rows found in {csv_path}")
+
+    arr = np.asarray(rows, dtype=float)
+    iters = arr[:, 0].astype(int)
+    e_site = arr[:, 3]
+    e_site_err = arr[:, 4]
+    return {
+        "iters": iters,
+        "e_site": e_site,
+        "e_site_err": e_site_err,
+    }
+
+
+# -----------------------------
+# Model/physics (unchanged)
+# -----------------------------
 @dataclass
 class RunConfig:
     L: int = 6
@@ -151,13 +194,6 @@ def build_sampler(hilbert, lattice, d_max: int = 2):
 
 
 def build_mlp_model_depth(n_sites: int, depth: int, param_dtype):
-    """
-    Depth definition:
-      depth=1 => hidden_dims=(N,)
-      depth=2 => hidden_dims=(N,N)
-      ...
-    where N = n_sites
-    """
     hidden_dims = tuple([n_sites] * depth)
     return nk.models.MLP(
         hidden_dims=hidden_dims,
@@ -168,13 +204,7 @@ def build_mlp_model_depth(n_sites: int, depth: int, param_dtype):
     )
 
 
-# --- FIX 2: NetKet SR driver compatibility across versions ---
 def build_vmc_sr_driver(hamiltonian, vstate, optimizer, diag_shift: float):
-    """
-    Compatibility across NetKet versions:
-      - If nk.driver.VMC_SR exists, use it.
-      - Else use nk.driver.VMC with SR preconditioner if available.
-    """
     if hasattr(nk.driver, "VMC_SR"):
         return nk.driver.VMC_SR(
             hamiltonian=hamiltonian,
@@ -204,13 +234,6 @@ def maybe_exact_ground_state_energy_per_site(
     J2: float,
     ed_max_sites: int,
 ) -> Optional[float]:
-    """
-    Tries NetKet ED/Lanczos for the ground state energy per site,
-    only if N_sites <= ed_max_sites.
-
-    Returns:
-      energy_per_site (float) if computed else None
-    """
     lattice, hilbert, ham = make_lattice_and_hamiltonian(L, J1, J2)
     n_sites = lattice.n_nodes
     if n_sites > ed_max_sites:
@@ -263,7 +286,6 @@ def run_single_vmc_sr_mlp_depth(
     )
 
     driver = build_vmc_sr_driver(hamiltonian=ham, vstate=vstate, optimizer=opt, diag_shift=cfg.diag_shift)
-
     log = nk.logging.RuntimeLog()
 
     t0 = time.time()
@@ -325,6 +347,9 @@ def run_single_vmc_sr_mlp_depth(
     }
 
 
+# -----------------------------
+# Plotting (unchanged)
+# -----------------------------
 def _plot_energy_curve(
     outpath: Path,
     title: str,
@@ -390,10 +415,10 @@ def plot_three_variants_energy_curve(
         )
 
 
+# -----------------------------
+# Summaries (unchanged, but supports missing entries in aggregate mode)
+# -----------------------------
 def write_per_run_summary(outdir: Path, rows: List[Dict[str, Any]]):
-    """
-    One row per run: (dtype, depth).
-    """
     ensure_dir(outdir)
 
     csv_path = outdir / "per_run_summary.csv"
@@ -401,11 +426,11 @@ def write_per_run_summary(outdir: Path, rows: List[Dict[str, Any]]):
         f.write("# Per-run summary (final energies per site)\n")
         f.write("dtype,depth,hidden_dims,n_params,runtime_s,final_e_site,final_e_site_err,paper_true_e_site,ed_true_e_site\n")
         for r in rows:
-            # --- FIX 3: remove nested f-strings (Python syntax error) ---
             paper = "" if r["paper_true"] is None else f"{r['paper_true']:.6f}"
             ed = "" if r["ed_true"] is None else f"{r['ed_true']:.12f}"
+            runtime_s = "" if r["runtime_s"] is None else f"{r['runtime_s']:.6f}"
             f.write(
-                f"{r['dtype']},{r['depth']},\"{r['hidden_dims']}\",{r['n_params']},{r['runtime_s']:.6f},"
+                f"{r['dtype']},{r['depth']},\"{r['hidden_dims']}\",{r['n_params']},{runtime_s},"
                 f"{r['final_e_site']:.12f},{r['final_e_site_err']:.12f},{paper},{ed}\n"
             )
 
@@ -417,7 +442,7 @@ def write_per_run_summary(outdir: Path, rows: List[Dict[str, Any]]):
             str(r["depth"]),
             str(r["hidden_dims"]),
             str(r["n_params"]),
-            f"{r['runtime_s']:.2f}",
+            ("" if r["runtime_s"] is None else f"{r['runtime_s']:.2f}"),
             f"{r['final_e_site']:.8f}",
             f"{r['final_e_site_err']:.8f}",
             ("" if r["paper_true"] is None else f"{r['paper_true']:.5f}"),
@@ -443,9 +468,6 @@ def write_per_run_summary(outdir: Path, rows: List[Dict[str, Any]]):
 
 
 def write_overall_results(outdir: Path, rows: List[Dict[str, Any]]):
-    """
-    One row per depth, side-by-side real vs complex.
-    """
     ensure_dir(outdir)
 
     csv_path = outdir / "overall_results.csv"
@@ -504,10 +526,66 @@ def write_overall_results(outdir: Path, rows: List[Dict[str, Any]]):
         f.write(line("-"))
 
 
+# -----------------------------
+# New: disk loading + mode logic
+# -----------------------------
+def get_output_dirs(out_root: Path) -> Dict[str, Path]:
+    real_root = out_root / "MLP_depth_real"
+    cplx_root = out_root / "MLP_depth_complex"
+    cmp_dtype_root = out_root / "compare_depth_per_dtype"
+    cmp_rvc_root = out_root / "compare_depth_real_vs_complex"
+    outdir_all = out_root / "compare_all_depths_and_dtypes"
+    for p in [real_root, cplx_root, cmp_dtype_root, cmp_rvc_root, outdir_all]:
+        ensure_dir(p)
+    return {
+        "real_root": real_root,
+        "cplx_root": cplx_root,
+        "cmp_dtype_root": cmp_dtype_root,
+        "cmp_rvc_root": cmp_rvc_root,
+        "outdir_all": outdir_all,
+    }
+
+def run_dir_for(outdirs: Dict[str, Path], dtype_str: str, depth: int) -> Path:
+    base = outdirs["real_root"] if dtype_str == "real" else outdirs["cplx_root"]
+    return base / f"depth_{depth}"
+
+def load_run_from_disk(outdirs: Dict[str, Path], dtype_str: str, depth: int) -> Optional[Dict[str, np.ndarray]]:
+    run_dir = run_dir_for(outdirs, dtype_str, depth)
+    tag = f"MLP_{dtype_str}_depth_{depth}"
+    csv_p = history_csv_path(run_dir, tag)
+
+    if not csv_p.exists():
+        return None
+
+    hist = load_history_csv(csv_p)
+    meta = load_json(run_dir / "run_meta.json") or {}
+
+    n_sites = int(meta.get("n_sites", -1))
+    runtime_s = meta.get("runtime_seconds", None)
+    n_params = int(meta.get("n_parameters", -1))
+
+    hist["n_sites"] = np.array([n_sites]) if n_sites >= 0 else np.array([-1])
+    hist["runtime_s"] = np.array([float(runtime_s)]) if runtime_s is not None else np.array([np.nan])
+    hist["n_params"] = np.array([n_params])
+    return hist
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Depth sweep for MLP NQS on J1-J2 Heisenberg (fixed J1=1, J2=0.5)."
+        description="Depth sweep for MLP NQS on J1-J2 Heisenberg (fixed J1=1, J2=0.5 by default)."
     )
+
+    # NEW
+    parser.add_argument("--mode", type=str, default="sweep",
+                        choices=["sweep", "train", "aggregate"],
+                        help="sweep: run all | train: run one (dtype,depth) | aggregate: merge/plot from existing outputs.")
+
+    # NEW (train mode controls)
+    parser.add_argument("--depth", type=int, default=None,
+                        help="Single depth for --mode train.")
+    parser.add_argument("--dtype", type=str, default=None,
+                        choices=[None, "real", "complex"],
+                        help="dtype for --mode train: real=float64, complex=complex128")
 
     parser.add_argument("--L", type=int, default=6)
     parser.add_argument("--J1", type=float, default=1.0)
@@ -532,24 +610,26 @@ def main():
 
     args = parser.parse_args()
 
-    depths = [int(x.strip()) for x in args.depths.split(",") if x.strip()]
+    depths = parse_depths(args.depths)
     out_root = Path(args.out)
     ensure_dir(out_root)
 
-    # Fixed “paper true” is for J2=0.5; if user changes J2, we still plot paper line only if it matches 0.5.
-    paper_true = PAPER_TRUE_E_SITE if abs(args.J2 - 0.5) < 1e-12 else None
+    outdirs = get_output_dirs(out_root)
 
-    # ED reference (only one, since J1/J2 fixed)
+    # Paper line only valid for J2=0.5 (your statement)
+    paper_true = PAPER_TRUE_E_SITE if abs(args.J2 - 0.5) < 1e-12 else None
     ed_true = maybe_exact_ground_state_energy_per_site(args.L, args.J1, args.J2, args.ed_max_sites)
 
-    # Terminal header
     n_sites = args.L * args.L
+
+    # Terminal header
     print("\n===================================================")
-    print("MLP Depth Sweep (VMC_SR) — Fixed Couplings")
+    print("MLP Depth Sweep (VMC_SR)")
     print("===================================================")
-    print(f"Requested platform: {args.platform}")
-    print(f"JAX backend:        {jax.default_backend()}")
-    print("JAX devices:        " + ", ".join([str(d) for d in jax.devices()]))
+    print(f"Mode:              {args.mode}")
+    print(f"Requested platform:{args.platform}")
+    print(f"JAX backend:       {jax.default_backend()}")
+    print("JAX devices:       " + ", ".join([str(d) for d in jax.devices()]))
     print("---------------------------------------------------")
     print(f"L={args.L} -> N_sites={n_sites}")
     print(f"J1={args.J1} | J2={args.J2}")
@@ -567,8 +647,9 @@ def main():
         print(f"NetKet ED reference:    {ed_true:.12f}")
     print("===================================================\n")
 
-    # Save config
+    # Save config (useful for aggregate)
     save_json(out_root / "config.json", {
+        "mode": args.mode,
         "L": args.L,
         "J1": args.J1,
         "J2": args.J2,
@@ -586,21 +667,256 @@ def main():
         "jax_devices": [str(d) for d in jax.devices()],
     })
 
-    # Output dirs
-    real_root = out_root / "MLP_depth_real"
-    cplx_root = out_root / "MLP_depth_complex"
-    cmp_dtype_root = out_root / "compare_depth_per_dtype"
-    cmp_rvc_root = out_root / "compare_depth_real_vs_complex"
-    for p in [real_root, cplx_root, cmp_dtype_root, cmp_rvc_root]:
-        ensure_dir(p)
+    # -----------------------------
+    # MODE: TRAIN (one config only)
+    # -----------------------------
+    if args.mode == "train":
+        if args.depth is None or args.dtype is None:
+            raise SystemExit("For --mode train you must provide: --depth <int> --dtype {real,complex}")
 
-    # Results store:
-    # hist[(dtype_str, depth)] = hist
+        depth = int(args.depth)
+        dtype_str = args.dtype
+
+        if dtype_str == "real":
+            dtype = jnp.float64
+        elif dtype_str == "complex":
+            dtype = jnp.complex128
+        else:
+            raise ValueError("dtype must be 'real' or 'complex'")
+
+        cfg = RunConfig(
+            L=args.L, J1=args.J1, J2=args.J2,
+            n_samples=args.n_samples,
+            n_discard_per_chain=args.discard,
+            n_iter=args.n_iter,
+            diag_shift=args.diag_shift,
+            seed=args.seed,
+            d_max=args.d_max,
+            mlp_lr=args.mlp_lr,
+            param_dtype=dtype,
+        )
+
+        outdir = run_dir_for(outdirs, dtype_str, depth)
+        tag = f"MLP_{dtype_str}_depth_{depth}"
+        hidden_dims = [n_sites] * depth
+
+        print(f"[RUN] {tag}")
+        print(f"      hidden_dims={hidden_dims}")
+        print(f"      outdir={outdir}")
+
+        h = run_single_vmc_sr_mlp_depth(cfg=cfg, depth=depth, outdir=outdir, tag=tag)
+
+        final_e = float(h["e_site"][-1])
+        final_err = float(h["e_site_err"][-1])
+        print(f"[DONE] Final E/site: {fmt_pm(final_e, final_err)}")
+        if paper_true is not None:
+            print(f"       Paper true:   {paper_true:.6f}  (Δ={final_e - paper_true:+.6f})")
+        if ed_true is not None:
+            print(f"       NetKet ED:    {ed_true:.12f}  (Δ={final_e - ed_true:+.6f})")
+        print()
+
+        # Per-run plot (3 variants)
+        title_base = (
+            f"MLP depth={depth} ({dtype_str} params) | hidden_dims={tuple(hidden_dims)} | "
+            f"L={args.L} (N_sites={n_sites}) | J1={args.J1} | J2={args.J2} | samples={args.n_samples}"
+        )
+        plot_three_variants_energy_curve(
+            outdir=outdir,
+            base_name=f"{tag}_energy_per_site",
+            title_base=title_base,
+            iters=h["iters"],
+            curves=[(f"depth={depth}", h["e_site"], h["e_site_err"])],
+            paper_true=paper_true,
+            ed_true=ed_true,
+        )
+
+        print("\nDONE (train mode)")
+        print(f"Outputs saved to: {out_root.resolve()}\n")
+        return
+
+    # -----------------------------
+    # MODE: AGGREGATE (merge/plot-only)
+    # -----------------------------
+    if args.mode == "aggregate":
+        print("[AGGREGATE] Reading existing runs from disk; no training will be performed.\n")
+
+        hist: Dict[Tuple[str, int], Dict[str, np.ndarray]] = {}
+        per_run_rows: List[Dict[str, Any]] = []
+
+        # Load available runs
+        for dtype_str in ["real", "complex"]:
+            for depth in depths:
+                h = load_run_from_disk(outdirs, dtype_str, depth)
+                if h is None:
+                    print(f"[AGGREGATE] Missing: dtype={dtype_str} depth={depth}")
+                    continue
+
+                hist[(dtype_str, depth)] = h
+
+                run_dir = run_dir_for(outdirs, dtype_str, depth)
+                tag = f"MLP_{dtype_str}_depth_{depth}"
+                hidden_dims = [n_sites] * depth
+
+                # Regenerate per-run plot (3 variants)
+                title_base = (
+                    f"MLP depth={depth} ({dtype_str} params) | hidden_dims={tuple(hidden_dims)} | "
+                    f"L={args.L} (N_sites={n_sites}) | J1={args.J1} | J2={args.J2} | samples={args.n_samples}"
+                )
+                plot_three_variants_energy_curve(
+                    outdir=run_dir,
+                    base_name=f"{tag}_energy_per_site",
+                    title_base=title_base,
+                    iters=h["iters"],
+                    curves=[(f"depth={depth}", h["e_site"], h["e_site_err"])],
+                    paper_true=paper_true,
+                    ed_true=ed_true,
+                )
+
+                per_run_rows.append({
+                    "dtype": dtype_str,
+                    "depth": depth,
+                    "hidden_dims": hidden_dims,
+                    "n_params": int(h["n_params"][0]) if "n_params" in h else -1,
+                    "runtime_s": None if np.isnan(float(h["runtime_s"][0])) else float(h["runtime_s"][0]),
+                    "final_e_site": float(h["e_site"][-1]),
+                    "final_e_site_err": float(h["e_site_err"][-1]),
+                    "paper_true": paper_true,
+                    "ed_true": ed_true,
+                })
+
+        # Write per-run summary (what exists)
+        if per_run_rows:
+            write_per_run_summary(out_root, per_run_rows)
+        else:
+            print("[AGGREGATE] No runs found; skipping summaries/plots.")
+            return
+
+        # compare_depth_per_dtype: only if all depths exist for that dtype
+        for dtype_str in ["real", "complex"]:
+            if all((dtype_str, d) in hist for d in depths):
+                curves = []
+                iters_ref = hist[(dtype_str, depths[0])]["iters"]
+                for depth in depths:
+                    h = hist[(dtype_str, depth)]
+                    curves.append((f"depth={depth}", h["e_site"], h["e_site_err"]))
+
+                outdir = outdirs["cmp_dtype_root"] / dtype_str
+                ensure_dir(outdir)
+                title_base = (
+                    f"MLP depth comparison ({dtype_str} params) | L={args.L} (N_sites={n_sites}) | "
+                    f"J1={args.J1} | J2={args.J2} | samples={args.n_samples}"
+                )
+                plot_three_variants_energy_curve(
+                    outdir=outdir,
+                    base_name=f"compare_depths_{dtype_str}",
+                    title_base=title_base,
+                    iters=iters_ref,
+                    curves=curves,
+                    paper_true=paper_true,
+                    ed_true=ed_true,
+                )
+            else:
+                print(f"[AGGREGATE] compare_depth_per_dtype/{dtype_str} skipped (missing one or more depths).")
+
+        # compare_depth_real_vs_complex: per depth if both exist
+        for depth in depths:
+            if ("real", depth) in hist and ("complex", depth) in hist:
+                h_r = hist[("real", depth)]
+                h_c = hist[("complex", depth)]
+                outdir = outdirs["cmp_rvc_root"] / f"depth_{depth}"
+                ensure_dir(outdir)
+                title_base = (
+                    f"MLP real vs complex | depth={depth} | hidden_dims={(n_sites,)*depth} | "
+                    f"L={args.L} (N_sites={n_sites}) | J1={args.J1} | J2={args.J2} | samples={args.n_samples}"
+                )
+                plot_three_variants_energy_curve(
+                    outdir=outdir,
+                    base_name=f"compare_real_vs_complex_depth_{depth}",
+                    title_base=title_base,
+                    iters=h_r["iters"],
+                    curves=[
+                        ("real params", h_r["e_site"], h_r["e_site_err"]),
+                        ("complex params", h_c["e_site"], h_c["e_site_err"]),
+                    ],
+                    paper_true=paper_true,
+                    ed_true=ed_true,
+                )
+            else:
+                print(f"[AGGREGATE] compare_depth_real_vs_complex/depth_{depth} skipped (missing real or complex).")
+
+        # compare_all_depths_and_dtypes: only if all exist
+        have_all = all((dt, d) in hist for dt in ["real", "complex"] for d in depths)
+        if have_all:
+            curves_all = []
+            iters_ref = hist[("real", depths[0])]["iters"]
+            for dtype_str in ["real", "complex"]:
+                for depth in depths:
+                    h = hist[(dtype_str, depth)]
+                    curves_all.append((f"{dtype_str}, depth={depth}", h["e_site"], h["e_site_err"]))
+
+            title_base_all = (
+                f"MLP depth sweep: all depths + real/complex | L={args.L} (N_sites={n_sites}) | "
+                f"J1={args.J1} | J2={args.J2} | samples={args.n_samples}"
+            )
+            plot_three_variants_energy_curve(
+                outdir=outdirs["outdir_all"],
+                base_name="compare_all_depths_and_dtypes",
+                title_base=title_base_all,
+                iters=iters_ref,
+                curves=curves_all,
+                paper_true=paper_true,
+                ed_true=ed_true,
+            )
+        else:
+            print("[AGGREGATE] compare_all_depths_and_dtypes skipped (missing one or more runs).")
+
+        # overall_results: one row per depth, real vs complex (allow missing)
+        overall_rows = []
+        for depth in depths:
+            hidden_dims = [n_sites] * depth
+
+            def get_final(dtype_str: str) -> Tuple[Optional[float], Optional[float]]:
+                if (dtype_str, depth) not in hist:
+                    return None, None
+                h = hist[(dtype_str, depth)]
+                return float(h["e_site"][-1]), float(h["e_site_err"][-1])
+
+            real_e, real_err = get_final("real")
+            cplx_e, cplx_err = get_final("complex")
+
+            def delta(a: Optional[float], b: Optional[float]) -> Optional[float]:
+                if a is None or b is None:
+                    return None
+                return float(a) - float(b)
+
+            overall_rows.append({
+                "depth": depth,
+                "hidden_dims": hidden_dims,
+                "paper_true": paper_true,
+                "ed_true": ed_true,
+                "real_e": real_e, "real_err": real_err,
+                "complex_e": cplx_e, "complex_err": cplx_err,
+                "d_real_paper": delta(real_e, paper_true),
+                "d_complex_paper": delta(cplx_e, paper_true),
+                "d_real_ed": delta(real_e, ed_true),
+                "d_complex_ed": delta(cplx_e, ed_true),
+            })
+
+        write_overall_results(out_root, overall_rows)
+
+        print("\n===================================================")
+        print("DONE (aggregate mode)")
+        print("===================================================")
+        print(f"All outputs saved to: {out_root.resolve()}\n")
+        return
+
+    # -----------------------------
+    # MODE: SWEEP (original behavior)
+    # -----------------------------
+    # Results store: hist[(dtype_str, depth)] = hist
     hist: Dict[Tuple[str, int], Dict[str, np.ndarray]] = {}
-
     per_run_rows: List[Dict[str, Any]] = []
 
-    # Run all depths for both dtypes
     for dtype_str, dtype in [("real", jnp.float64), ("complex", jnp.complex128)]:
         print(f"\n#############################")
         print(f"### Running dtype = {dtype_str.upper()}")
@@ -619,10 +935,10 @@ def main():
                 param_dtype=dtype,
             )
 
-            outdir = (real_root if dtype_str == "real" else cplx_root) / f"depth_{depth}"
+            outdir = run_dir_for(outdirs, dtype_str, depth)
             tag = f"MLP_{dtype_str}_depth_{depth}"
-
             hidden_dims = [n_sites] * depth
+
             print(f"[RUN] {tag}")
             print(f"      hidden_dims={hidden_dims}")
             print(f"      outdir={outdir}")
@@ -666,14 +982,9 @@ def main():
                 "ed_true": ed_true,
             })
 
-    # Write per-run summary
     write_per_run_summary(out_root, per_run_rows)
 
-    # -----------------------------------------
-    # Comparisons: depth vs depth (per dtype)
-    #   - real: all depths on one plot (3 variants)
-    #   - complex: all depths on one plot (3 variants)
-    # -----------------------------------------
+    # compare_depth_per_dtype
     for dtype_str in ["real", "complex"]:
         curves = []
         iters_ref = None
@@ -683,9 +994,8 @@ def main():
                 iters_ref = h["iters"]
             curves.append((f"depth={depth}", h["e_site"], h["e_site_err"]))
 
-        outdir = cmp_dtype_root / dtype_str
+        outdir = outdirs["cmp_dtype_root"] / dtype_str
         ensure_dir(outdir)
-
         title_base = (
             f"MLP depth comparison ({dtype_str} params) | L={args.L} (N_sites={n_sites}) | "
             f"J1={args.J1} | J2={args.J2} | samples={args.n_samples}"
@@ -700,14 +1010,11 @@ def main():
             ed_true=ed_true,
         )
 
-    # -----------------------------------------
-    # Comparisons: real vs complex (per depth)
-    #   For each depth, plot real vs complex (3 variants)
-    # -----------------------------------------
+    # compare_depth_real_vs_complex
     for depth in depths:
         h_r = hist[("real", depth)]
         h_c = hist[("complex", depth)]
-        outdir = cmp_rvc_root / f"depth_{depth}"
+        outdir = outdirs["cmp_rvc_root"] / f"depth_{depth}"
         ensure_dir(outdir)
 
         title_base = (
@@ -728,12 +1035,7 @@ def main():
             ed_true=ed_true,
         )
 
-    # -----------------------------------------
-    # One plot comparing ALL (depth,dtype) together (8 curves) (3 variants)
-    # -----------------------------------------
-    outdir_all = out_root / "compare_all_depths_and_dtypes"
-    ensure_dir(outdir_all)
-
+    # compare_all_depths_and_dtypes
     curves_all = []
     iters_ref = hist[("real", depths[0])]["iters"]
     for dtype_str in ["real", "complex"]:
@@ -746,7 +1048,7 @@ def main():
         f"J1={args.J1} | J2={args.J2} | samples={args.n_samples}"
     )
     plot_three_variants_energy_curve(
-        outdir=outdir_all,
+        outdir=outdirs["outdir_all"],
         base_name="compare_all_depths_and_dtypes",
         title_base=title_base_all,
         iters=iters_ref,
@@ -755,9 +1057,7 @@ def main():
         ed_true=ed_true,
     )
 
-    # -----------------------------------------
-    # Overall results (one row per depth, real vs complex side-by-side)
-    # -----------------------------------------
+    # overall_results
     overall_rows = []
     for depth in depths:
         h_r = hist[("real", depth)]
@@ -791,14 +1091,9 @@ def main():
     print("===================================================")
     print(f"All outputs saved to: {out_root.resolve()}")
     print("Summary files:")
-    print("  - per_run_summary.csv / per_run_summary.txt   (one row per run)")
-    print("  - overall_results.csv / overall_results.txt   (one row per depth, real vs complex)")
-    print("Plots:")
-    print("  - per-run (each depth, each dtype) in MLP_depth_* folders")
-    print("  - depth comparisons per dtype in compare_depth_per_dtype/")
-    print("  - real vs complex per depth in compare_depth_real_vs_complex/")
-    print("  - all curves together in compare_all_depths_and_dtypes/")
-    print("Note: NetKet ED reference is skipped unless N_sites <= ed_max_sites.\n")
+    print("  - per_run_summary.csv / per_run_summary.txt")
+    print("  - overall_results.csv / overall_results.txt")
+    print("Plots regenerated as in the original layout.\n")
 
 
 if __name__ == "__main__":
