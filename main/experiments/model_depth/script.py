@@ -43,6 +43,10 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 
 import numpy as np
+
+# --- FIX 1: force headless matplotlib on clusters (before pyplot import) ---
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # -----------------------------
@@ -164,6 +168,36 @@ def build_mlp_model_depth(n_sites: int, depth: int, param_dtype):
     )
 
 
+# --- FIX 2: NetKet SR driver compatibility across versions ---
+def build_vmc_sr_driver(hamiltonian, vstate, optimizer, diag_shift: float):
+    """
+    Compatibility across NetKet versions:
+      - If nk.driver.VMC_SR exists, use it.
+      - Else use nk.driver.VMC with SR preconditioner if available.
+    """
+    if hasattr(nk.driver, "VMC_SR"):
+        return nk.driver.VMC_SR(
+            hamiltonian=hamiltonian,
+            optimizer=optimizer,
+            diag_shift=diag_shift,
+            variational_state=vstate,
+        )
+
+    if hasattr(nk.optimizer, "SR"):
+        sr = nk.optimizer.SR(diag_shift=diag_shift)
+        return nk.driver.VMC(
+            hamiltonian=hamiltonian,
+            optimizer=optimizer,
+            variational_state=vstate,
+            preconditioner=sr,
+        )
+
+    raise RuntimeError(
+        "Could not find SR driver/preconditioner. "
+        "Your NetKet version may be incompatible with this script."
+    )
+
+
 def maybe_exact_ground_state_energy_per_site(
     L: int,
     J1: float,
@@ -228,12 +262,7 @@ def run_single_vmc_sr_mlp_depth(
         seed=cfg.seed,
     )
 
-    driver = nk.driver.VMC_SR(
-        hamiltonian=ham,
-        optimizer=opt,
-        diag_shift=cfg.diag_shift,
-        variational_state=vstate,
-    )
+    driver = build_vmc_sr_driver(hamiltonian=ham, vstate=vstate, optimizer=opt, diag_shift=cfg.diag_shift)
 
     log = nk.logging.RuntimeLog()
 
@@ -372,11 +401,12 @@ def write_per_run_summary(outdir: Path, rows: List[Dict[str, Any]]):
         f.write("# Per-run summary (final energies per site)\n")
         f.write("dtype,depth,hidden_dims,n_params,runtime_s,final_e_site,final_e_site_err,paper_true_e_site,ed_true_e_site\n")
         for r in rows:
+            # --- FIX 3: remove nested f-strings (Python syntax error) ---
+            paper = "" if r["paper_true"] is None else f"{r['paper_true']:.6f}"
+            ed = "" if r["ed_true"] is None else f"{r['ed_true']:.12f}"
             f.write(
                 f"{r['dtype']},{r['depth']},\"{r['hidden_dims']}\",{r['n_params']},{r['runtime_s']:.6f},"
-                f"{r['final_e_site']:.12f},{r['final_e_site_err']:.12f},"
-                f"{'' if r['paper_true'] is None else f'{r['paper_true']:.6f}'},"
-                f"{'' if r['ed_true'] is None else f'{r['ed_true']:.12f}'}\n"
+                f"{r['final_e_site']:.12f},{r['final_e_site_err']:.12f},{paper},{ed}\n"
             )
 
     headers = ["DTYPE", "DEPTH", "HIDDEN_DIMS", "N_PARAMS", "RUNTIME(s)", "FINAL E/SITE", "ERR", "PAPER", "ED"]
@@ -425,9 +455,9 @@ def write_overall_results(outdir: Path, rows: List[Dict[str, Any]]):
         for r in rows:
             def s(x, prec=12):
                 return "" if x is None else f"{x:.{prec}f}"
+            paper = "" if r["paper_true"] is None else f"{r['paper_true']:.6f}"
             f.write(
-                f"{r['depth']},\"{r['hidden_dims']}\","
-                f"{'' if r['paper_true'] is None else f'{r['paper_true']:.6f}'},"
+                f"{r['depth']},\"{r['hidden_dims']}\",{paper},"
                 f"{s(r['ed_true'])},"
                 f"{s(r['real_e'])},{s(r['real_err'])},"
                 f"{s(r['complex_e'])},{s(r['complex_err'])},"

@@ -7,41 +7,14 @@ Activation-function sweep for MLP Neural Quantum States (NetKet) on J1-J2 Heisen
 Fixed:
   - J1 = 1.0
   - J2 in [0.5, 0.6]
-  - LxL square lattice (PBC), total_sz = 0 sector (same as your setup)
-  - MLP only with TWO hidden layers (N, N) where N = n_sites = L*L
+  - LxL square lattice (PBC), total_sz = 0 sector
+  - MLP only with TWO hidden layers (N, N) where N = n_sites * hidden_scale
   - Run each activation once with REAL params, once with COMPLEX params
 
 Key requirement:
   Some activations are not holomorphic / not defined for complex inputs (ReLU, GELU, SiLU).
   For COMPLEX parameters we therefore apply the activation to real/imag parts separately:
      f_c(z) = f(Re(z)) + i f(Im(z))
-  This makes the code run for complex-valued intermediate features without claiming it is
-  a "true complex activation". (It's an explicit design choice to enable comparison.)
-
-True values:
-  - Paper E/site:
-      J2=0.5 : -0.50381
-      J2=0.6 : -0.49518
-  For every plot we create 3 variants:
-    (a) no true value
-    (b) with paper true value
-    (c) with NetKet ED true value if feasible (small systems only, controlled by --ed_max_sites)
-
-Outputs (under --out):
-  MLP_activations_real/J2_*/act_*/
-  MLP_activations_complex/J2_*/act_*/
-  compare_per_j2/J2_*/
-    - compare_activations_real_*.png (+paper/+ed)
-    - compare_activations_complex_*.png (+paper/+ed)
-    - compare_real_vs_complex_per_activation/*.png (+paper/+ed)
-    - compare_all_real_and_complex_*.png (+paper/+ed)
-  summaries:
-    - per_run_summary.csv / per_run_summary.txt      (one row per run: dtype, activation, J2)
-    - overall_results.csv / overall_results.txt      (one row per (activation,J2): real vs complex side-by-side)
-    - sweep_config.json
-
-GPU support:
-  --platform gpu sets JAX_PLATFORM_NAME=gpu BEFORE importing jax/netket.
 
 Usage:
   python mlp_activation_sweep_real_vs_complex.py --platform gpu
@@ -79,12 +52,26 @@ set_platform(_platform)
 
 import jax
 import jax.numpy as jnp
+
+# ESSENTIAL: Enable 64-bit precision for physics simulations
+jax.config.update("jax_enable_x64", True)
+
 import netket as nk
-from netket.nn.activation import log_cosh
+
+# Import log_cosh handling different NetKet versions
+try:
+    from netket.nn import log_cosh
+except ImportError:
+    try:
+        from netket.nn.activation import log_cosh
+    except ImportError:
+        # Fallback implementation
+        def log_cosh(x):
+            return jnp.log(jnp.cosh(x))
 
 
 # -----------------------------
-# Paper true values (energy per site) provided by you
+# Paper true values (energy per site)
 # -----------------------------
 PAPER_TRUE_E_SITE = {
     0.5: -0.50381,
@@ -129,13 +116,16 @@ def style_matplotlib():
 # Model / VMC(SR) helpers
 # -----------------------------
 def make_lattice_and_hamiltonian(L: int, J1: float, J2: float):
+    # max_neighbor_order=2 ensures edges for NN (color 0) and NNN (color 1) are generated
     lattice = nk.graph.Square(length=L, max_neighbor_order=2, pbc=True)
     hilbert = nk.hilbert.Spin(s=0.5, total_sz=0.0, N=lattice.n_nodes)
+    
+    # NetKet Heisenberg applies J[0] to edges with color 0, J[1] to color 1
     ham = nk.operator.Heisenberg(
         hilbert=hilbert,
         graph=lattice,
         J=[J1, J2],
-        sign_rule=[False, False],
+        sign_rule=[False, False], 
     )
     return lattice, hilbert, ham
 
@@ -144,18 +134,9 @@ def build_sampler(hilbert, lattice, d_max: int = 2):
 
 def build_vmc_sr_driver(hamiltonian, vstate, optimizer, diag_shift: float):
     """
-    Compatibility across NetKet versions:
-      - If nk.driver.VMC_SR exists, use it.
-      - Else use nk.driver.VMC with SR preconditioner if available.
+    Setup VMC driver with Stochastic Reconfiguration (SR).
     """
-    if hasattr(nk.driver, "VMC_SR"):
-        return nk.driver.VMC_SR(
-            hamiltonian=hamiltonian,
-            optimizer=optimizer,
-            diag_shift=diag_shift,
-            variational_state=vstate,
-        )
-
+    # Modern NetKet approach (v3.0+)
     if hasattr(nk.optimizer, "SR"):
         sr = nk.optimizer.SR(diag_shift=diag_shift)
         return nk.driver.VMC(
@@ -164,11 +145,17 @@ def build_vmc_sr_driver(hamiltonian, vstate, optimizer, diag_shift: float):
             variational_state=vstate,
             preconditioner=sr,
         )
+        
+    # Older NetKet approach fallback
+    if hasattr(nk.driver, "VMC_SR"):
+        return nk.driver.VMC_SR(
+            hamiltonian=hamiltonian,
+            optimizer=optimizer,
+            diag_shift=diag_shift,
+            variational_state=vstate,
+        )
 
-    raise RuntimeError(
-        "Could not find SR driver/preconditioner. "
-        "Your NetKet version may be incompatible with this script."
-    )
+    raise RuntimeError("Could not configure VMC with SR. Check NetKet version.")
 
 
 # -----------------------------
@@ -186,23 +173,28 @@ def maybe_exact_ground_state_energy_per_site(
         return None
 
     try:
+        # NetKet v3+ lanczos_ed
         if hasattr(nk.exact, "lanczos_ed"):
             res = nk.exact.lanczos_ed(ham, k=1, compute_eigenvectors=False)
+            # Handle different return types across versions
             if hasattr(res, "eigenvalues"):
                 e0 = float(np.asarray(res.eigenvalues)[0])
             elif isinstance(res, dict) and "eigenvalues" in res:
                 e0 = float(np.asarray(res["eigenvalues"])[0])
             else:
-                arr = np.asarray(res[0] if isinstance(res, (tuple, list)) else res)
-                e0 = float(arr[0])
+                # Some versions return just the array or list
+                arr = np.asarray(res)
+                e0 = float(arr[0] if arr.size > 0 else arr)
             return e0 / n_sites
 
+        # Fallback to dense diagonalization
         if hasattr(nk.exact, "diag"):
             evals = nk.exact.diag(ham)
             e0 = float(np.min(np.asarray(evals)))
             return e0 / n_sites
 
-    except Exception:
+    except Exception as e:
+        print(f"Warning: ED failed: {e}")
         return None
 
     return None
@@ -215,12 +207,9 @@ def complexify_activation(act_real: Callable) -> Callable:
     """
     Make an activation usable on complex inputs by applying it to Re and Im separately:
         f_c(z) = f(Re z) + i f(Im z)
-
-    This is NOT claimed to be holomorphic; it is a pragmatic choice to allow
-    complex-parameter experiments when the activation is not naturally defined on C.
     """
     def act(z):
-        z = jnp.asarray(z)
+        # jnp.iscomplexobj is correct for checking dtype of JAX tracers
         if jnp.iscomplexobj(z):
             return act_real(jnp.real(z)) + 1j * act_real(jnp.imag(z))
         return act_real(z)
@@ -228,17 +217,6 @@ def complexify_activation(act_real: Callable) -> Callable:
 
 
 def get_activation_map() -> Dict[str, Callable]:
-    """
-    Base (real) activations:
-      - relu, silu, gelu, log_cosh
-    We'll use jax.nn for first three and NetKet log_cosh.
-
-    For complex runs:
-      - relu/silu/gelu are wrapped with complexify_activation
-      - log_cosh is assumed to accept complex inputs (NetKet/JAX typically can handle it),
-        but we still pass it through complexify_activation to enforce a consistent rule
-        if you prefer. By default below we *do not* wrap log_cosh because it is analytic.
-    """
     return {
         "relu": jax.nn.relu,
         "silu": jax.nn.silu,
@@ -266,7 +244,7 @@ class RunConfig:
 
     # MLP (N,N)
     mlp_lr: float = 1e-3
-    hidden_scale: int = 1  # hidden width = n_sites*hidden_scale
+    hidden_scale: int = 1 
 
     param_dtype: Any = jnp.float64
 
@@ -277,10 +255,8 @@ def build_mlp_model_two_layers(
     param_dtype: Any,
     activation: Callable,
 ):
-    """
-    Two hidden layers (N,N) where N = n_sites*hidden_scale.
-    """
     h = int(n_sites * hidden_scale)
+    # NetKet MLP automatically creates dense layers with the given activation
     return nk.models.MLP(
         hidden_dims=(h, h),
         param_dtype=param_dtype,
@@ -291,7 +267,7 @@ def build_mlp_model_two_layers(
 
 
 # -----------------------------
-# Plotting helpers (3 variants)
+# Plotting helpers
 # -----------------------------
 def _plot_energy_curve(
     outpath: Path,
@@ -310,7 +286,7 @@ def _plot_energy_curve(
 
     if true_line is not None:
         tlab, tval = true_line
-        ax.axhline(tval, linestyle="--", linewidth=2.0, label=tlab)
+        ax.axhline(tval, linestyle="--", linewidth=2.0, color='black', label=tlab)
 
     ax.set_xlabel("Iteration")
     ax.set_ylabel("Energy per site")
@@ -374,12 +350,15 @@ def run_single_mlp_activation(
     n_sites = lattice.n_nodes
 
     sampler = build_sampler(hilbert, lattice, cfg.d_max)
+    
     model = build_mlp_model_two_layers(
         n_sites=n_sites,
         hidden_scale=cfg.hidden_scale,
         param_dtype=cfg.param_dtype,
         activation=act_fn,
     )
+    
+    # NetKet 3 optimizer is an optax wrapper
     opt = nk.optimizer.Adam(learning_rate=cfg.mlp_lr)
 
     vstate = nk.vqs.MCState(
@@ -397,12 +376,28 @@ def run_single_mlp_activation(
     driver.run(n_iter=cfg.n_iter, out=log)
     t1 = time.time()
 
+    # Data extraction - Handling NetKet 3+ dictionary structure
     data = log.data
-    E_hist = data["Energy"]
-
-    iters = np.asarray(E_hist.iters, dtype=int)
-    E_mean = np.asarray(E_hist.Mean.real, dtype=float)
-    E_sigma = np.asarray(E_hist.Sigma.real, dtype=float)
+    
+    # Check structure to ensure compatibility
+    if "Energy" not in data:
+         raise RuntimeError("Energy not found in log data.")
+         
+    e_log = data["Energy"]
+    
+    # NetKet 3 returns a dict for stats, NetKet 2 returned an object
+    if isinstance(e_log, dict):
+        iters = np.asarray(e_log["iters"], dtype=int)
+        E_mean = np.asarray(e_log["Mean"], dtype=float) # .real handled by np.asarray usually, but explicit casting is safer
+        E_sigma = np.asarray(e_log["Sigma"], dtype=float)
+        # Handle complex numbers if they leaked (should be real for Energy)
+        if np.iscomplexobj(E_mean): E_mean = E_mean.real
+        if np.iscomplexobj(E_sigma): E_sigma = E_sigma.real
+    else:
+        # Fallback for object-style logs
+        iters = np.asarray(e_log.iters, dtype=int)
+        E_mean = np.asarray(e_log.Mean.real, dtype=float)
+        E_sigma = np.asarray(e_log.Sigma.real, dtype=float)
 
     e_site = E_mean / n_sites
     e_site_err = E_sigma / n_sites
@@ -458,9 +453,6 @@ def run_single_mlp_activation(
 # Summaries
 # -----------------------------
 def write_per_run_summary(outdir: Path, rows: List[Dict[str, Any]]):
-    """
-    One row per run: (dtype, activation, J2)
-    """
     ensure_dir(outdir)
 
     csv_path = outdir / "per_run_summary.csv"
@@ -510,9 +502,6 @@ def write_per_run_summary(outdir: Path, rows: List[Dict[str, Any]]):
 
 
 def write_overall_results(outdir: Path, rows: List[Dict[str, Any]]):
-    """
-    One row per (activation, J2): real vs complex side-by-side.
-    """
     ensure_dir(outdir)
 
     csv_path = outdir / "overall_results.csv"
