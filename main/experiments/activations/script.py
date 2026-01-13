@@ -14,6 +14,10 @@ Fixed model structure:
   - For complex runs:
       complex_activation_mode=split applies f(Re)+i f(Im) for non-holomorphic activations
       complex_activation_mode=native applies activation directly to complex (may fail for relu/silu/gelu)
+
+Cluster/GPU stability:
+  - Disables XLA CUDA graphs by default (can avoid CUDA_ERROR_INVALID_VALUE crashes).
+    If you *want* CUDA graphs, set XLA_FLAGS yourself before launching the job.
 """
 
 import os
@@ -28,9 +32,9 @@ import numpy as np
 
 # Headless matplotlib support (important on clusters)
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-
 
 # -----------------------------
 # Platform selection MUST happen before importing jax/netket
@@ -41,12 +45,33 @@ def preparse_platform(argv: List[str]) -> str:
     args, _ = p.parse_known_args(argv)
     return args.platform
 
+
 def set_platform(platform: str) -> None:
     if platform.lower() != "auto":
         os.environ["JAX_PLATFORM_NAME"] = platform.lower()
 
+
+# -----------------------------
+# GPU stability: disable CUDA graphs unless user explicitly set them
+# -----------------------------
+def ensure_xla_no_cuda_graphs_default() -> None:
+    """
+    Many JAX/XLA stacks can crash with:
+      CUDA error: Failed to launch CUDA graph: CUDA_ERROR_INVALID_VALUE
+    Disabling CUDA graphs is a safe default.
+    """
+    xla_flags = os.environ.get("XLA_FLAGS", "")
+    # If user already specified any cuda-graphs flag, respect it.
+    if "xla_gpu_enable_cuda_graphs" in xla_flags:
+        return
+    # Append (or set) disable flag
+    extra = "--xla_gpu_enable_cuda_graphs=false"
+    os.environ["XLA_FLAGS"] = (xla_flags + " " + extra).strip()
+
+
 _platform = preparse_platform(os.sys.argv[1:])
 set_platform(_platform)
+ensure_xla_no_cuda_graphs_default()
 
 import jax
 import jax.numpy as jnp
@@ -56,13 +81,16 @@ jax.config.update("jax_enable_x64", True)
 
 import netket as nk
 
-# log_cosh import across NetKet versions
+# -----------------------------
+# log_cosh import across NetKet versions (prefer non-deprecated path)
+# -----------------------------
 try:
-    from netket.nn import log_cosh
-except ImportError:
+    from netket.nn.activation import log_cosh
+except Exception:
     try:
-        from netket.nn.activation import log_cosh
-    except ImportError:
+        from netket.nn import log_cosh  # older versions
+    except Exception:
+
         def log_cosh(x):
             return jnp.log(jnp.cosh(x))
 
@@ -82,34 +110,40 @@ PAPER_TRUE_E_SITE = {
 def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
+
 def save_json(path: Path, obj: dict) -> None:
     ensure_dir(path.parent)
     path.write_text(json.dumps(obj, indent=2, sort_keys=True), encoding="utf-8")
 
+
 def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
 
 def fmt_pm(val: float, err: float, prec: int = 6) -> str:
     return f"{val:.{prec}f} ± {err:.{prec}f}"
 
+
 def style_matplotlib():
-    plt.rcParams.update({
-        "figure.dpi": 220,
-        "savefig.dpi": 450,
-        "axes.grid": True,
-        "grid.alpha": 0.22,
-        "grid.linestyle": "-",
-        "axes.spines.top": False,
-        "axes.spines.right": False,
-        "legend.frameon": True,
-        "legend.framealpha": 0.92,
-        "font.size": 12,
-        "axes.titlesize": 14,
-        "axes.labelsize": 12,
-        "xtick.labelsize": 11,
-        "ytick.labelsize": 11,
-        "lines.linewidth": 2.0,
-    })
+    plt.rcParams.update(
+        {
+            "figure.dpi": 220,
+            "savefig.dpi": 450,
+            "axes.grid": True,
+            "grid.alpha": 0.22,
+            "grid.linestyle": "-",
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "legend.frameon": True,
+            "legend.framealpha": 0.92,
+            "font.size": 12,
+            "axes.titlesize": 14,
+            "axes.labelsize": 12,
+            "xtick.labelsize": 11,
+            "ytick.labelsize": 11,
+            "lines.linewidth": 2.0,
+        }
+    )
 
 
 # -----------------------------
@@ -117,6 +151,7 @@ def style_matplotlib():
 # -----------------------------
 def make_lattice_and_hamiltonian(L: int, J1: float, J2: float):
     lattice = nk.graph.Square(length=L, max_neighbor_order=2, pbc=True)
+    # total_sz=0.0 works for even number of spins; keep float for API compatibility
     hilbert = nk.hilbert.Spin(s=0.5, total_sz=0.0, N=lattice.n_nodes)
     ham = nk.operator.Heisenberg(
         hilbert=hilbert,
@@ -126,8 +161,10 @@ def make_lattice_and_hamiltonian(L: int, J1: float, J2: float):
     )
     return lattice, hilbert, ham
 
+
 def build_sampler(hilbert, lattice, d_max: int = 2):
     return nk.sampler.MetropolisExchange(hilbert=hilbert, graph=lattice, d_max=d_max)
+
 
 def build_vmc_sr_driver(hamiltonian, vstate, optimizer, diag_shift: float):
     # Prefer modern NetKet: VMC + SR preconditioner
@@ -153,7 +190,9 @@ def build_vmc_sr_driver(hamiltonian, vstate, optimizer, diag_shift: float):
 # -----------------------------
 # ED reference (NetKet) if feasible
 # -----------------------------
-def maybe_exact_ground_state_energy_per_site(L: int, J1: float, J2: float, ed_max_sites: int) -> Optional[float]:
+def maybe_exact_ground_state_energy_per_site(
+    L: int, J1: float, J2: float, ed_max_sites: int
+) -> Optional[float]:
     lattice, hilbert, ham = make_lattice_and_hamiltonian(L, J1, J2)
     n_sites = lattice.n_nodes
     if n_sites > ed_max_sites:
@@ -183,11 +222,13 @@ def maybe_exact_ground_state_energy_per_site(L: int, J1: float, J2: float, ed_ma
 # Activations
 # -----------------------------
 def complexify_activation(act_real: Callable) -> Callable:
+    """Apply a real activation separately to Re/Im parts."""
     def act(z):
         if jnp.iscomplexobj(z):
             return act_real(jnp.real(z)) + 1j * act_real(jnp.imag(z))
         return act_real(z)
     return act
+
 
 def get_activation_map() -> Dict[str, Callable]:
     return {
@@ -206,9 +247,9 @@ class RunConfig:
     L: int = 6
     J1: float = 1.0
     J2: float = 0.5
-    n_samples: int = 10000
+    n_samples: int = 8000          # CHANGED default
     n_discard_per_chain: int = 50
-    n_iter: int = 600
+    n_iter: int = 600              # CHANGED default
     diag_shift: float = 0.01
     seed: int = 1234
     d_max: int = 2
@@ -217,7 +258,9 @@ class RunConfig:
     param_dtype: Any = jnp.float64
 
 
-def build_mlp_model_two_layers(n_sites: int, hidden_scale: int, param_dtype: Any, activation: Callable):
+def build_mlp_model_two_layers(
+    n_sites: int, hidden_scale: int, param_dtype: Any, activation: Callable
+):
     h = int(n_sites * hidden_scale)
     return nk.models.MLP(
         hidden_dims=(h, h),
@@ -231,9 +274,13 @@ def build_mlp_model_two_layers(n_sites: int, hidden_scale: int, param_dtype: Any
 # -----------------------------
 # Plot helpers
 # -----------------------------
-def _plot_energy_curve(outpath: Path, title: str, iters: np.ndarray,
-                      curves: List[Tuple[str, np.ndarray, np.ndarray]],
-                      true_line: Optional[Tuple[str, float]] = None):
+def _plot_energy_curve(
+    outpath: Path,
+    title: str,
+    iters: np.ndarray,
+    curves: List[Tuple[str, np.ndarray, np.ndarray]],
+    true_line: Optional[Tuple[str, float]] = None,
+):
     style_matplotlib()
     fig = plt.figure(figsize=(12, 6))
     ax = fig.add_subplot(1, 1, 1)
@@ -255,31 +302,57 @@ def _plot_energy_curve(outpath: Path, title: str, iters: np.ndarray,
     fig.savefig(outpath)
     plt.close(fig)
 
-def plot_three_variants_energy_curve(outdir: Path, base_name: str, title_base: str,
-                                    iters: np.ndarray, curves: List[Tuple[str, np.ndarray, np.ndarray]],
-                                    paper_true: Optional[float], ed_true: Optional[float]):
+
+def plot_three_variants_energy_curve(
+    outdir: Path,
+    base_name: str,
+    title_base: str,
+    iters: np.ndarray,
+    curves: List[Tuple[str, np.ndarray, np.ndarray]],
+    paper_true: Optional[float],
+    ed_true: Optional[float],
+):
     _plot_energy_curve(outdir / f"{base_name}.png", title_base, iters, curves, None)
     if paper_true is not None:
-        _plot_energy_curve(outdir / f"{base_name}__paper_true.png",
-                           f"{title_base} | Paper reference", iters, curves,
-                           ("Paper E/site", float(paper_true)))
+        _plot_energy_curve(
+            outdir / f"{base_name}__paper_true.png",
+            f"{title_base} | Paper reference",
+            iters,
+            curves,
+            ("Paper E/site", float(paper_true)),
+        )
     if ed_true is not None:
-        _plot_energy_curve(outdir / f"{base_name}__ed_true.png",
-                           f"{title_base} | NetKet ED reference", iters, curves,
-                           ("NetKet ED E/site", float(ed_true)))
+        _plot_energy_curve(
+            outdir / f"{base_name}__ed_true.png",
+            f"{title_base} | NetKet ED reference",
+            iters,
+            curves,
+            ("NetKet ED E/site", float(ed_true)),
+        )
 
 
 # -----------------------------
 # Training: run ONE configuration
 # -----------------------------
-def run_single_mlp_activation(cfg: RunConfig, dtype_label: str, act_name: str, act_fn: Callable, outdir: Path) -> Dict[str, np.ndarray]:
+def run_single_mlp_activation(
+    cfg: RunConfig,
+    dtype_label: str,
+    act_name: str,
+    act_fn: Callable,
+    outdir: Path,
+) -> Dict[str, np.ndarray]:
     ensure_dir(outdir)
 
     lattice, hilbert, ham = make_lattice_and_hamiltonian(cfg.L, cfg.J1, cfg.J2)
     n_sites = lattice.n_nodes
 
     sampler = build_sampler(hilbert, lattice, cfg.d_max)
-    model = build_mlp_model_two_layers(n_sites=n_sites, hidden_scale=cfg.hidden_scale, param_dtype=cfg.param_dtype, activation=act_fn)
+    model = build_mlp_model_two_layers(
+        n_sites=n_sites,
+        hidden_scale=cfg.hidden_scale,
+        param_dtype=cfg.param_dtype,
+        activation=act_fn,
+    )
     opt = nk.optimizer.Adam(learning_rate=cfg.mlp_lr)
 
     vstate = nk.vqs.MCState(
@@ -290,7 +363,9 @@ def run_single_mlp_activation(cfg: RunConfig, dtype_label: str, act_name: str, a
         seed=cfg.seed,
     )
 
-    driver = build_vmc_sr_driver(hamiltonian=ham, vstate=vstate, optimizer=opt, diag_shift=cfg.diag_shift)
+    driver = build_vmc_sr_driver(
+        hamiltonian=ham, vstate=vstate, optimizer=opt, diag_shift=cfg.diag_shift
+    )
     log = nk.logging.RuntimeLog()
 
     t0 = time.time()
@@ -302,18 +377,21 @@ def run_single_mlp_activation(cfg: RunConfig, dtype_label: str, act_name: str, a
         raise RuntimeError("Energy not found in log data.")
     e_log = data["Energy"]
 
+    # RuntimeLog format differs across NetKet versions
     if isinstance(e_log, dict):
         iters = np.asarray(e_log["iters"], dtype=int)
         E_mean = np.asarray(e_log["Mean"])
         E_sigma = np.asarray(e_log["Sigma"])
-        if np.iscomplexobj(E_mean): E_mean = E_mean.real
-        if np.iscomplexobj(E_sigma): E_sigma = E_sigma.real
+        if np.iscomplexobj(E_mean):
+            E_mean = E_mean.real
+        if np.iscomplexobj(E_sigma):
+            E_sigma = E_sigma.real
         E_mean = E_mean.astype(float)
         E_sigma = E_sigma.astype(float)
     else:
         iters = np.asarray(e_log.iters, dtype=int)
-        E_mean = np.asarray(e_log.Mean.real, dtype=float)
-        E_sigma = np.asarray(e_log.Sigma.real, dtype=float)
+        E_mean = np.asarray(np.asarray(e_log.Mean).real, dtype=float)
+        E_sigma = np.asarray(np.asarray(e_log.Sigma).real, dtype=float)
 
     e_site = E_mean / n_sites
     e_site_err = E_sigma / n_sites
@@ -321,10 +399,16 @@ def run_single_mlp_activation(cfg: RunConfig, dtype_label: str, act_name: str, a
     # History CSV
     csv_path = outdir / f"mlp_{dtype_label}_{act_name}_J2_{cfg.J2:.2f}_history.csv"
     with csv_path.open("w", encoding="utf-8") as f:
-        f.write(f"# MLP (N,N) activation sweep | dtype={dtype_label} | activation={act_name}\n")
+        f.write(
+            f"# MLP (N,N) activation sweep | dtype={dtype_label} | activation={act_name}\n"
+        )
         f.write(f"# L={cfg.L} (N_sites={n_sites}) | J1={cfg.J1} | J2={cfg.J2}\n")
-        f.write(f"# n_samples={cfg.n_samples} | n_iter={cfg.n_iter} | diag_shift={cfg.diag_shift} | seed={cfg.seed}\n")
-        f.write("iter,energy_mean,energy_sigma,energy_per_site_mean,energy_per_site_sigma\n")
+        f.write(
+            f"# n_samples={cfg.n_samples} | n_iter={cfg.n_iter} | diag_shift={cfg.diag_shift} | seed={cfg.seed}\n"
+        )
+        f.write(
+            "iter,energy_mean,energy_sigma,energy_per_site_mean,energy_per_site_sigma\n"
+        )
         for i, em, es, eps, epe in zip(iters, E_mean, E_sigma, e_site, e_site_err):
             f.write(f"{int(i)},{em:.12f},{es:.12f},{eps:.12f},{epe:.12f}\n")
 
@@ -368,7 +452,6 @@ def run_single_mlp_activation(cfg: RunConfig, dtype_label: str, act_name: str, a
 # Aggregation: load histories from disk
 # -----------------------------
 def read_history_csv(path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    # skip comment lines starting with '#'
     rows = []
     with path.open("r", encoding="utf-8") as f:
         for line in f:
@@ -392,7 +475,9 @@ def write_per_run_summary(outdir: Path, rows: List[Dict[str, Any]]):
     csv_path = outdir / "per_run_summary.csv"
     with csv_path.open("w", encoding="utf-8") as f:
         f.write("# Per-run summary (one row per dtype, activation, J2)\n")
-        f.write("dtype,activation,J2,n_params,runtime_s,final_e_site,final_e_site_err,paper_true_e_site,ed_true_e_site\n")
+        f.write(
+            "dtype,activation,J2,n_params,runtime_s,final_e_site,final_e_site_err,paper_true_e_site,ed_true_e_site\n"
+        )
         for r in rows:
             paper = "" if r["paper_true"] is None else f"{r['paper_true']:.6f}"
             ed = "" if r["ed_true"] is None else f"{r['ed_true']:.12f}"
@@ -403,15 +488,23 @@ def write_per_run_summary(outdir: Path, rows: List[Dict[str, Any]]):
                 f"{paper},{ed}\n"
             )
 
+
 def write_overall_results(outdir: Path, rows: List[Dict[str, Any]]):
     ensure_dir(outdir)
     csv_path = outdir / "overall_results.csv"
     with csv_path.open("w", encoding="utf-8") as f:
-        f.write("# Overall results: one row per (activation,J2), real vs complex side-by-side\n")
-        f.write("activation,J2,paper_true,ed_true,real_e,real_err,complex_e,complex_err,d_real_paper,d_complex_paper,d_real_ed,d_complex_ed\n")
+        f.write(
+            "# Overall results: one row per (activation,J2), real vs complex side-by-side\n"
+        )
+        f.write(
+            "activation,J2,paper_true,ed_true,real_e,real_err,complex_e,complex_err,"
+            "d_real_paper,d_complex_paper,d_real_ed,d_complex_ed\n"
+        )
         for r in rows:
+
             def s(x, prec=12):
                 return "" if x is None else f"{x:.{prec}f}"
+
             paper = "" if r["paper_true"] is None else f"{r['paper_true']:.6f}"
             f.write(
                 f"{r['activation']},{r['J2']:.2f},"
@@ -428,7 +521,9 @@ def write_overall_results(outdir: Path, rows: List[Dict[str, Any]]):
 # Main
 # -----------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Activation sweep for MLP (two hidden layers) with real vs complex params on J1-J2 model.")
+    parser = argparse.ArgumentParser(
+        description="Activation sweep for MLP (two hidden layers) with real vs complex params on J1-J2 model."
+    )
 
     parser.add_argument("--mode", type=str, default="train", choices=["train", "aggregate"])
 
@@ -443,10 +538,14 @@ def main():
     parser.add_argument("--activations", type=str, default="relu,silu,gelu,log_cosh")
 
     parser.add_argument("--dtype", type=str, default="real", choices=["real", "complex"])
-    parser.add_argument("--complex_activation_mode", type=str, default="split", choices=["split", "native"])
+    parser.add_argument(
+        "--complex_activation_mode", type=str, default="split", choices=["split", "native"]
+    )
 
-    parser.add_argument("--n_samples", type=int, default=10000)
+    # CHANGED defaults here:
+    parser.add_argument("--n_samples", type=int, default=8000)
     parser.add_argument("--n_iter", type=int, default=600)
+
     parser.add_argument("--discard", type=int, default=50)
     parser.add_argument("--diag_shift", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=1234)
@@ -458,7 +557,12 @@ def main():
     parser.add_argument("--platform", type=str, default=_platform, choices=["auto", "cpu", "gpu", "tpu"])
     parser.add_argument("--out", type=str, default="results_mlp_activation_sweep")
 
-    parser.add_argument("--ed_max_sites", type=int, default=20, help="Compute NetKet ED reference only if N_sites <= ed_max_sites.")
+    parser.add_argument(
+        "--ed_max_sites",
+        type=int,
+        default=20,
+        help="Compute NetKet ED reference only if N_sites <= ed_max_sites.",
+    )
 
     args = parser.parse_args()
 
@@ -497,7 +601,9 @@ def main():
             act_note = "real"
 
         cfg = RunConfig(
-            L=args.L, J1=args.J1, J2=args.J2,
+            L=args.L,
+            J1=args.J1,
+            J2=args.J2,
             n_samples=args.n_samples,
             n_discard_per_chain=args.discard,
             n_iter=args.n_iter,
@@ -519,7 +625,9 @@ def main():
         print(f"[TRAIN] {tag}")
         print(f"  activation_mode: {act_note}")
         print(f"  outdir: {run_dir}")
-        hist = run_single_mlp_activation(cfg, dtype_label=dtype_label, act_name=act_name, act_fn=act_fn, outdir=run_dir)
+        hist = run_single_mlp_activation(
+            cfg, dtype_label=dtype_label, act_name=act_name, act_fn=act_fn, outdir=run_dir
+        )
 
         # per-run plots
         title_base = (
@@ -575,17 +683,19 @@ def main():
                     "runtime_s": np.array([float(meta.get("runtime_seconds", 0.0))], dtype=np.float64),
                 }
 
-                per_run_rows.append({
-                    "dtype": dtype_label,
-                    "activation": act,
-                    "J2": J2,
-                    "n_params": int(meta.get("n_parameters", 0)),
-                    "runtime_s": float(meta.get("runtime_seconds", 0.0)),
-                    "final_e_site": float(meta.get("final_energy_per_site", e_site[-1])),
-                    "final_e_site_err": float(meta.get("final_energy_per_site_err", e_site_err[-1])),
-                    "paper_true": paper_true,
-                    "ed_true": ed_true,
-                })
+                per_run_rows.append(
+                    {
+                        "dtype": dtype_label,
+                        "activation": act,
+                        "J2": J2,
+                        "n_params": int(meta.get("n_parameters", 0)),
+                        "runtime_s": float(meta.get("runtime_seconds", 0.0)),
+                        "final_e_site": float(meta.get("final_energy_per_site", e_site[-1])),
+                        "final_e_site_err": float(meta.get("final_energy_per_site_err", e_site_err[-1])),
+                        "paper_true": paper_true,
+                        "ed_true": ed_true,
+                    }
+                )
 
     # Write per-run summary
     write_per_run_summary(out_root, per_run_rows)
@@ -611,20 +721,22 @@ def main():
             def delta(a: float, b: Optional[float]) -> Optional[float]:
                 return None if b is None else a - float(b)
 
-            overall_rows.append({
-                "activation": act,
-                "J2": J2,
-                "paper_true": paper_true,
-                "ed_true": ed_true,
-                "real_e": real_e,
-                "real_err": real_err,
-                "complex_e": cplx_e,
-                "complex_err": cplx_err,
-                "d_real_paper": delta(real_e, paper_true),
-                "d_complex_paper": delta(cplx_e, paper_true),
-                "d_real_ed": delta(real_e, ed_true),
-                "d_complex_ed": delta(cplx_e, ed_true),
-            })
+            overall_rows.append(
+                {
+                    "activation": act,
+                    "J2": J2,
+                    "paper_true": paper_true,
+                    "ed_true": ed_true,
+                    "real_e": real_e,
+                    "real_err": real_err,
+                    "complex_e": cplx_e,
+                    "complex_err": cplx_err,
+                    "d_real_paper": delta(real_e, paper_true),
+                    "d_complex_paper": delta(cplx_e, paper_true),
+                    "d_real_ed": delta(real_e, ed_true),
+                    "d_complex_ed": delta(cplx_e, ed_true),
+                }
+            )
 
     write_overall_results(out_root, overall_rows)
 
