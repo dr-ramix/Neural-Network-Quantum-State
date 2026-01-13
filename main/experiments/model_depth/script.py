@@ -160,7 +160,7 @@ class RunConfig:
     J1: float = 1.0
     J2: float = 0.5
 
-    n_samples: int = 10000
+    n_samples: int = 8000
     n_discard_per_chain: int = 50
     n_iter: int = 600
     diag_shift: float = 0.01
@@ -593,7 +593,7 @@ def main():
 
     parser.add_argument("--depths", type=str, default="1,2,3,4",
                         help="Comma-separated depths to run (e.g. 1,2,3,4).")
-    parser.add_argument("--n_samples", type=int, default=10000)
+    parser.add_argument("--n_samples", type=int, default=8000)
     parser.add_argument("--n_iter", type=int, default=600)
     parser.add_argument("--discard", type=int, default=50)
     parser.add_argument("--diag_shift", type=float, default=0.01)
