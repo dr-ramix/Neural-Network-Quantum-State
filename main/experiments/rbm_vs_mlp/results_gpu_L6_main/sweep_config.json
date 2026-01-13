@@ -10,16 +10,16 @@
   "diag_shift": 0.01,
   "discard": 50,
   "ed_max_sites": 20,
-  "jax_backend": "gpu",
+  "jax_backend": "cpu",
   "jax_devices": [
-    "cuda:0"
+    "TFRT_CPU_0"
   ],
   "mlp": {
     "activation": "log_cosh",
     "hidden_scale": 1,
     "lr": 0.001
   },
-  "mode": "train",
+  "mode": "aggregate",
   "n_iter": 800,
   "n_samples": 10000,
   "rbm": {

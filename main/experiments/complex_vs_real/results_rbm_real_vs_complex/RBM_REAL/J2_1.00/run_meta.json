@@ -1,0 +1,29 @@
+{
+  "J1": 1.0,
+  "J2": 1.0,
+  "L": 6,
+  "ansatz": "RBM",
+  "diag_shift": 0.01,
+  "dtype_label": "REAL",
+  "ed_true_e_site": null,
+  "final_energy_per_site": -1.3325139182664616,
+  "final_energy_per_site_err": 0.00042268993610521333,
+  "jax_backend": "gpu",
+  "jax_devices": [
+    "cuda:0"
+  ],
+  "n_discard_per_chain": 50,
+  "n_iter": 800,
+  "n_parameters": 5364,
+  "n_samples": 10000,
+  "n_sites": 36,
+  "optimizer": {
+    "learning_rate": 0.001,
+    "type": "Adam"
+  },
+  "paper_true_e_site": -0.71436,
+  "param_dtype": "<class 'jax.numpy.float64'>",
+  "rbm_alpha": 4,
+  "runtime_seconds": 5740.5012130737305,
+  "seed": 1234
+}
