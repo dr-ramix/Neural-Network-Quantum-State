@@ -10,6 +10,7 @@ The project is designed to bridge **theoretical physics** and **practical implem
 
 The core of the project is located in the `main/` directory, organized into **Theory** (educational resources) and **Experiments** (numerical benchmarks).
 
+```text
 nqs/
 ├── main/
 │   ├── theory/             # Conceptual Notebooks (Bridge between Physics & Code)
@@ -27,7 +28,6 @@ nqs/
 │
 ├── requirements.txt        # Project dependencies
 └── venv/                   # Local virtual environment
-
 
 
 1. Theory & Concepts (main/theory)
