@@ -61,7 +61,6 @@ Experiment scripts generate structured output directories containing metadata, l
 Optimization History (history.csv)
 Each run tracks energy metrics per iteration.
 
-Code-Snippet
 # MLP_complex history | L=6 (N=36) | J1=1.0 | J2=0.5
 # n_samples=10000 | n_iter=800 | diag_shift=0.01 | seed=1234
 iter,energy_mean,energy_sigma,energy_per_site_mean,energy_per_site_sigma
@@ -72,10 +71,12 @@ iter,energy_mean,energy_sigma,energy_per_site_mean,energy_per_site_sigma
 
 Aggregated Summaries (overall_results.txt)
 Results are compiled to compare architectures against literature values ("PAPER") or Exact Diagonalization ("ED"). Below is a summary of the energy outcomes for varying $J_2$ values:
-J2 = 0.40: MLP_r (-0.8213 ± 0.0027) vs RBM_c (-1.8862 ± 0.0017). Paper Ref: -0.52975
-J2 = 0.50: MLP_r (-0.6675 ± 0.0046) vs RBM_c (-1.7260 ± 0.0028). Paper Ref: -0.50381
-J2 = 0.60: MLP_r (-0.7896 ± 0.0050) vs RBM_c (-1.7443 ± 0.0016). Paper Ref: -0.49518
-J2 = 1.00: MLP_r (-1.0071 ± 0.0055) vs RBM_c (-2.7114 ± 0.0021). Paper Ref: -0.714364
+
+J2,MLP_r,±,RBM_c,±,PAPER
+0.40,-0.82129423,0.00268095,-1.88622975,0.00174663,-0.52975
+0.50,-0.66749237,0.00460037,-1.72603150,0.00280502,-0.50381
+0.60,-0.78963651,0.00502005,-1.74428215,0.00159689,-0.49518
+1.00,-1.00707327,0.00553822,-2.71140240,0.00209320,-0.71436
 
 
 
