@@ -197,7 +197,7 @@ def plot_real_vs_complex(
             it_r, e_r,
             marker="o",
             markersize=2.2 if tag == "small" else 2.6,
-            label="RBM real: $E/N \\pm \\sigma/N$",
+            label="RBM real",
             zorder=3,
         )
         cr = line_r.get_color()
@@ -213,7 +213,7 @@ def plot_real_vs_complex(
             it_c, e_c,
             marker="o",
             markersize=2.2 if tag == "small" else 2.6,
-            label="RBM complex: $E/N \\pm \\sigma/N$",
+            label="RBM complex",
             zorder=3,
         )
         cc = line_c.get_color()

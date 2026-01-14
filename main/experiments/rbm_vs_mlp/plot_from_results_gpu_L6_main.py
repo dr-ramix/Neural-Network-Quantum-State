@@ -163,7 +163,7 @@ def plot_energy(
             iters, y,
             marker="o",
             markersize=2.5,
-            label=label + r": $E/N \pm \sigma/N$",
+            label=label + r"",
             zorder=3
         )
         c = line.get_color()
