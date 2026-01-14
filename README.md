@@ -31,52 +31,39 @@ nqs/
 ```
 
 1. Theory & Concepts (main/theory)
-This module provides a "physics-first" introduction to Neural Quantum States.
-It contains Jupyter notebooks designed to bridge abstract mathematical theory with concrete NetKet/JAX implementation.
-
-Key Implementations:
-MLP: Feed-forward neural networks as wave functions.
-RBM: Restricted Boltzmann Machines.
-Topics CoveredHilbert Space: Mapping the physical model to the code.Variational
-Ansätze: Mathematical formulation of the wave function $\psi_\theta$.
-The NetKet Ecosystem: Understanding Samplers, Operators, and Variational States.
-Stochastic Reconfiguration (SR): Optimization techniques for energy minimization.
+   This module provides a "physics-first" introduction to Neural Quantum States.
+   It contains Jupyter notebooks designed to bridge abstract mathematical theory with concrete NetKet/JAX implementation.
+   
+   Key Implementations:
+   MLP: Feed-forward neural networks as wave functions.
+   RBM: Restricted Boltzmann Machines.
+   Topics CoveredHilbert Space: Mapping the physical model to the code.Variational
+   Ansätze: Mathematical formulation of the wave function $\psi_\theta$.
+   The NetKet Ecosystem: Understanding Samplers, Operators, and Variational States.
+   Stochastic Reconfiguration (SR): Optimization techniques for energy minimization.
 
 
 
 2. Numerical Experiments (main/experiments)This directory contains systematic, reproducible studies.
    Each subdirectory focuses on a specific hyperparameter or architectural comparison.
 
-Experimental SetupPhysical:
-Model: Spin-1/2 J1–J2 Heisenberg model on a square lattice.
-Hamiltonian: $J_1 = 1.0$ (fixed), with varying $J_2$ (e.g., $0.4, 0.5, 0.6, 1.0$).
-Symmetry: Zero magnetization sector ($S^z_{tot} = 0$).
-Benchmark CategoriesRBM vs. MLP: Comparing the expressivity of different architectures.
-Complex vs. Real Parameters: Analyzing the necessity of complex weights for ground-state estimation.Model 
-Depth: Impact of adding layers to the ansatz.
-Activation Functions: Performance of different non-linearities (e.g., LogCosh, ReLU, GeLU).
-Optimizers: Comparative study of Adam vs AdamW in the context of VMC.3. Results & Output FormatThe code prioritizes reproducibility.
+   Experimental SetupPhysical:
+   Model: Spin-1/2 J1–J2 Heisenberg model on a square lattice.
+   Hamiltonian: $J_1 = 1.0$ (fixed), with varying $J_2$ (e.g., $0.4, 0.5, 0.6, 1.0$).
+   Symmetry: Zero magnetization sector ($S^z_{tot} = 0$).
+   Benchmark CategoriesRBM vs. MLP: Comparing the expressivity of different architectures.
+   Complex vs. Real Parameters: Analyzing the necessity of complex weights for ground-state estimation.Model 
+   Depth: Impact of adding layers to the ansatz.
+   Activation Functions: Performance of different non-linearities (e.g., LogCosh, ReLU, GeLU).
+   Optimizers: Comparative study of Adam vs AdamW in the context of VMC.3. Results & Output FormatThe code prioritizes reproducibility.
+   
+   Experiment scripts generate structured output directories containing metadata, logs, and summary tables.
+   Optimization History (history.csv)
+   Each run tracks energy metrics per iteration.
+   
+   Aggregated Summaries (overall_results.txt)
+   Results are compiled to compare architectures against literature values ("PAPER") or Exact Diagonalization ("ED"). Below is a summary of the energy outcomes for varying $J_2$ values.
 
-Experiment scripts generate structured output directories containing metadata, logs, and summary tables.
-Optimization History (history.csv)
-Each run tracks energy metrics per iteration.
-
-# MLP_complex history | L=6 (N=36) | J1=1.0 | J2=0.5
-# n_samples=10000 | n_iter=800 | diag_shift=0.01 | seed=1234
-iter,energy_mean,energy_sigma,energy_per_site_mean,energy_per_site_sigma
-0,97.950538,0.283818,2.720848,0.007883
-1,97.623274,0.282013,2.711757,0.007833
-2,97.288895,0.299014,2.702469,0.008305
-...
-
-Aggregated Summaries (overall_results.txt)
-Results are compiled to compare architectures against literature values ("PAPER") or Exact Diagonalization ("ED"). Below is a summary of the energy outcomes for varying $J_2$ values:
-
-J2,MLP_r,±,RBM_c,±,PAPER
-0.40,-0.82129423,0.00268095,-1.88622975,0.00174663,-0.52975
-0.50,-0.66749237,0.00460037,-1.72603150,0.00280502,-0.50381
-0.60,-0.78963651,0.00502005,-1.74428215,0.00159689,-0.49518
-1.00,-1.00707327,0.00553822,-2.71140240,0.00209320,-0.71436
 
 
 
