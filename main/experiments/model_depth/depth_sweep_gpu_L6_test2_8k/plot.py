@@ -180,7 +180,7 @@ def plot(
     # Plot lines + errors
     for label, it, y, yerr in curves:
         (line,) = ax.plot(it, y, marker="o", markersize=2.2 if figsize[0] < 9 else 2.6,
-                          label=label + r": $E/N \pm \sigma/N$", zorder=3)
+                          label=label + r"", zorder=3)
         c = line.get_color()
 
         ax.errorbar(it, y, yerr=yerr, fmt="none",
