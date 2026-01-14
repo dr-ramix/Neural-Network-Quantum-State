@@ -1,0 +1,32 @@
+{
+  "J1": 1.0,
+  "J2": 0.5,
+  "L": 6,
+  "arch": "MLP",
+  "depth": 3,
+  "diag_shift": 0.01,
+  "final_energy_per_site": -0.33915769362878084,
+  "final_energy_per_site_err": 0.010667341567603999,
+  "hidden_dims": [
+    36,
+    36,
+    36
+  ],
+  "jax_backend": "gpu",
+  "jax_devices": [
+    "cuda:0"
+  ],
+  "n_discard_per_chain": 50,
+  "n_iter": 600,
+  "n_parameters": 4033,
+  "n_samples": 8000,
+  "n_sites": 36,
+  "optimizer": {
+    "learning_rate": 0.001,
+    "type": "Adam"
+  },
+  "param_dtype": "<class 'jax.numpy.complex128'>",
+  "runtime_seconds": 11719.788990974426,
+  "seed": 1234,
+  "tag": "MLP_complex_depth_3"
+}
