@@ -28,7 +28,7 @@ nqs/
 │
 ├── requirements.txt        # Project dependencies
 └── venv/                   # Local virtual environment
-
+```
 
 1. Theory & Concepts (main/theory)
 This module provides a "physics-first" introduction to Neural Quantum States.
